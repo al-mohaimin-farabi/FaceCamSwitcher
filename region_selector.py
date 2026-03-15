@@ -211,6 +211,15 @@ class RegionSelector:
                 config = json.load(f)
 
         config["capture_region"] = self.selected_region
+        if "input_source" not in config:
+            config["input_source"] = {}
+        if "window_region" not in config["input_source"]:
+            config["input_source"]["window_region"] = {}
+        
+        config["input_source"]["window_region"]["left"] = self.selected_region["left"]
+        config["input_source"]["window_region"]["top"] = self.selected_region["top"]
+        config["input_source"]["window_region"]["width"] = self.selected_region["width"]
+        config["input_source"]["window_region"]["height"] = self.selected_region["height"]
 
         with open(CONFIG_PATH, "w", encoding="utf-8") as f:
             json.dump(config, f, indent=4)

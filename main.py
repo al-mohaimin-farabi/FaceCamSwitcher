@@ -247,13 +247,16 @@ class FaceCamApp:
         self.start_btn = self._make_button(btn_frame, "▶  Start", self._toggle_capture, C["green"])
         self.start_btn.pack(fill=tk.X, pady=2)
 
-        self.select_btn = self._make_button(btn_frame, "⊞  Select Region", self._open_region_selector, C["accent"])
-        self.select_btn.pack(fill=tk.X, pady=2)
+        self.select_window_btn = self._make_button(btn_frame, "🖥  Select Window", self._open_window_selector, C["accent"])
+        self.select_window_btn.pack(fill=tk.X, pady=2)
+
+        self.select_camera_btn = self._make_button(btn_frame, "📷  Select Camera", self._open_camera_selector, C["cyan"])
+        self.select_camera_btn.pack(fill=tk.X, pady=2)
 
         self.snap_btn = self._make_button(btn_frame, "📸  Single Snap", self._single_snap, C["purple"])
         self.snap_btn.pack(fill=tk.X, pady=2)
 
-        self.reload_btn = self._make_button(btn_frame, "↻  Reload Names", self._reload_names, C["cyan"])
+        self.reload_btn = self._make_button(btn_frame, "↻  Reload Names", self._reload_names, C["text_dim"])
         self.reload_btn.pack(fill=tk.X, pady=2)
 
         # ── LEFT: Stats Card ─────────────────────────────────────────
@@ -424,13 +427,19 @@ class FaceCamApp:
             from ocr_engine import OCREngine
             self.engine = OCREngine(config)
 
-            # Update region info
-            r = config.get("capture_region", {})
-            region_text = (
-                f"Monitor {r.get('monitor_index', '?')}  •  "
-                f"{r.get('width', 0)}×{r.get('height', 0)}  •  "
-                f"({r.get('left', 0)}, {r.get('top', 0)})"
-            )
+            # Update input source info
+            src = config.get("input_source", {})
+            src_type = src.get("type", "window")
+            if src_type == "camera":
+                region_text = f"Camera {src.get('camera_index', 0)}"
+            else:
+                hwnd = src.get("window_hwnd", 0)
+                title = src.get("window_title", "")
+                r = src.get("window_region", {})
+                if hwnd and title:
+                    region_text = f"Window: {title[:30]}  •  {r.get('width', 0)}×{r.get('height', 0)}"
+                else:
+                    region_text = f"Screen  •  {r.get('width', 0)}×{r.get('height', 0)}  •  ({r.get('left', 0)}, {r.get('top', 0)})"
 
             interval = config.get("capture", {}).get("interval_seconds", 2)
 
@@ -722,38 +731,144 @@ class FaceCamApp:
             self._log("No text detected", "dim")
 
     # ──────────────────────────────────────────────────────────────────
-    # Region selector
+    # Input source selectors
     # ──────────────────────────────────────────────────────────────────
 
-    def _open_region_selector(self):
-        """Launch the region selector, then reload config."""
-        self.root.withdraw()  # Hide main window
-
+    def _open_window_selector(self):
+        """Show a dialog to pick a window, then optionally select a region within it."""
         try:
-            from region_selector import RegionSelector
-            selector = RegionSelector()
-            region = selector.run()
-
-            if region:
-                self._log(f"Region updated: {region}", "info")
-                # Reload engine config
-                if self.engine:
-                    self.engine.reload_config()
-                # Update region info display
-                r = region
-                region_text = (
-                    f"Monitor {r.get('monitor_index', '?')}  •  "
-                    f"{r.get('width', 0)}×{r.get('height', 0)}  •  "
-                    f"({r.get('left', 0)}, {r.get('top', 0)})"
-                )
-                self.region_info_label.configure(text=region_text)
-                self._set_status("Region updated", C["green"])
-            else:
-                self._log("Region selection cancelled", "dim")
+            from ocr_engine import list_windows
+            windows = list_windows()
         except Exception as exc:
-            self._log(f"Region selector error: {exc}", "error")
-        finally:
-            self.root.deiconify()  # Show main window again
+            self._log(f"Could not list windows: {exc}", "error")
+            return
+
+        if not windows:
+            self._set_status("No windows found", C["yellow"])
+            return
+
+        # Build a simple selection dialog
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Select Window")
+        dlg.configure(bg=C["bg"])
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Choose a window to capture:", font=self.font_label,
+                 fg=C["text_dim"], bg=C["bg"]).pack(padx=16, pady=(12, 6), anchor=tk.W)
+
+        lb_frame = tk.Frame(dlg, bg=C["bg"])
+        lb_frame.pack(fill=tk.BOTH, expand=True, padx=16, pady=(0, 8))
+
+        scrollbar = tk.Scrollbar(lb_frame)
+        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+
+        lb = tk.Listbox(lb_frame, bg=C["bg_card"], fg=C["text"], font=self.font_small,
+                        selectbackground=C["accent"], height=14, width=60,
+                        yscrollcommand=scrollbar.set, relief=tk.FLAT,
+                        highlightthickness=1, highlightbackground=C["border"])
+        lb.pack(side=tk.LEFT, fill=tk.BOTH)
+        scrollbar.config(command=lb.yview)
+
+        for w in windows:
+            lb.insert(tk.END, w["title"])
+
+        chosen = {"hwnd": 0, "title": ""}
+
+        def on_ok():
+            sel = lb.curselection()
+            if sel:
+                idx = sel[0]
+                chosen["hwnd"] = windows[idx]["hwnd"]
+                chosen["title"] = windows[idx]["title"]
+            dlg.destroy()
+
+        btn_row = tk.Frame(dlg, bg=C["bg"])
+        btn_row.pack(fill=tk.X, padx=16, pady=(0, 12))
+        tk.Button(btn_row, text="Select", command=on_ok, bg=C["accent"], fg="white",
+                  font=self.font_btn, relief=tk.FLAT, padx=12, pady=4).pack(side=tk.RIGHT)
+        tk.Button(btn_row, text="Cancel", command=dlg.destroy, bg=C["bg_card"], fg=C["text_dim"],
+                  font=self.font_btn, relief=tk.FLAT, padx=12, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
+
+        self.root.wait_window(dlg)
+
+        if chosen["hwnd"]:
+            # Save to config
+            config = load_config()
+            config.setdefault("input_source", {})
+            config["input_source"]["type"] = "window"
+            config["input_source"]["window_hwnd"] = chosen["hwnd"]
+            config["input_source"]["window_title"] = chosen["title"]
+            import json
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4)
+
+            if self.engine:
+                self.engine.reload_config()
+
+            label = f"Window: {chosen['title'][:40]}"
+            self.region_info_label.configure(text=label)
+            self._set_status("Window selected", C["green"])
+            self._log(f"Window selected: {chosen['title']}", "info")
+
+    def _open_camera_selector(self):
+        """Show a dialog to pick a camera device index."""
+        try:
+            from ocr_engine import list_cameras
+            cameras = list_cameras()
+        except Exception as exc:
+            self._log(f"Could not list cameras: {exc}", "error")
+            cameras = [{"index": 0, "name": "Camera 0 (default)"}]
+
+        if not cameras:
+            cameras = [{"index": 0, "name": "Camera 0 (default)"}]
+
+        dlg = tk.Toplevel(self.root)
+        dlg.title("Select Camera")
+        dlg.configure(bg=C["bg"])
+        dlg.resizable(False, False)
+        dlg.grab_set()
+
+        tk.Label(dlg, text="Choose a camera input:", font=self.font_label,
+                 fg=C["text_dim"], bg=C["bg"]).pack(padx=16, pady=(12, 6), anchor=tk.W)
+
+        var = tk.IntVar(value=cameras[0]["index"])
+        for cam in cameras:
+            tk.Radiobutton(dlg, text=cam["name"], variable=var, value=cam["index"],
+                           bg=C["bg"], fg=C["text"], selectcolor=C["bg_card"],
+                           activebackground=C["bg"], font=self.font_small).pack(
+                               padx=24, anchor=tk.W, pady=2)
+
+        chosen = {"index": -1}
+
+        def on_ok():
+            chosen["index"] = var.get()
+            dlg.destroy()
+
+        btn_row = tk.Frame(dlg, bg=C["bg"])
+        btn_row.pack(fill=tk.X, padx=16, pady=(8, 12))
+        tk.Button(btn_row, text="Select", command=on_ok, bg=C["accent"], fg="white",
+                  font=self.font_btn, relief=tk.FLAT, padx=12, pady=4).pack(side=tk.RIGHT)
+        tk.Button(btn_row, text="Cancel", command=dlg.destroy, bg=C["bg_card"], fg=C["text_dim"],
+                  font=self.font_btn, relief=tk.FLAT, padx=12, pady=4).pack(side=tk.RIGHT, padx=(0, 8))
+
+        self.root.wait_window(dlg)
+
+        if chosen["index"] >= 0:
+            import json
+            config = load_config()
+            config.setdefault("input_source", {})
+            config["input_source"]["type"] = "camera"
+            config["input_source"]["camera_index"] = chosen["index"]
+            with open(CONFIG_PATH, "w", encoding="utf-8") as f:
+                json.dump(config, f, indent=4)
+
+            if self.engine:
+                self.engine.reload_config()
+
+            self.region_info_label.configure(text=f"Camera {chosen['index']}")
+            self._set_status("Camera selected", C["green"])
+            self._log(f"Camera {chosen['index']} selected", "info")
 
     # ──────────────────────────────────────────────────────────────────
     # Reload names

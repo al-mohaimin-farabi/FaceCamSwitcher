@@ -5,3 +5,6 @@ Pillow
 requests
 thefuzz
 python-Levenshtein
+pywin32
+opencv-python
+pygrabber

@@ -25,12 +25,41 @@ struct CommandResult {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct CaptureRegion {
-    monitor_index: u32,
+struct WindowRegion {
     left: i32,
     top: i32,
     width: i32,
     height: i32,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct InputSource {
+    #[serde(rename = "type")]
+    source_type: String,    // "window" | "camera"
+    #[serde(default)]
+    window_hwnd: i64,
+    #[serde(default)]
+    window_title: String,
+    #[serde(default = "default_window_region")]
+    window_region: WindowRegion,
+    #[serde(default)]
+    camera_index: u32,
+}
+
+fn default_window_region() -> WindowRegion {
+    WindowRegion { left: 0, top: 0, width: 530, height: 193 }
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct WindowInfo {
+    hwnd: i64,
+    title: String,
+}
+
+#[derive(Serialize, Deserialize, Clone)]
+struct CameraInfo {
+    index: u32,
+    name: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -60,7 +89,7 @@ struct CaptureConfig {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct AppConfig {
-    capture_region: CaptureRegion,
+    input_source: InputSource,
     server: ServerConfig,
     ocr: OcrConfig,
     capture: CaptureConfig,
@@ -173,28 +202,52 @@ fn save_config(config: AppConfig) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
-fn save_region(region: CaptureRegion) -> Result<CommandResult, String> {
-    let path = get_config_path();
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
-    let mut config: serde_json::Value = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))?;
-    
-    config["capture_region"] = serde_json::to_value(&region)
-        .map_err(|e| format!("Failed to serialize region: {}", e))?;
-    
-    let updated = serde_json::to_string_pretty(&config)
-        .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    fs::write(&path, updated)
-        .map_err(|e| format!("Failed to write config: {}", e))?;
-    
-    Ok(CommandResult {
-        success: true,
-        message: format!(
-            "Region saved: Monitor {} | {}x{} @ ({},{})",
-            region.monitor_index, region.width, region.height, region.left, region.top
-        ),
-    })
+fn list_windows() -> Result<Vec<WindowInfo>, String> {
+    let facecam_dir = get_facecam_dir();
+    let (program, mut args) = get_backend_command();
+    args.push("--list-windows".to_string());
+
+    let output = Command::new(&program)
+        .args(&args)
+        .current_dir(&facecam_dir)
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("Failed to run backend: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    // Find the JSON line (last non-empty line)
+    let json_line = stdout.lines()
+        .filter(|l| l.trim_start().starts_with('['))
+        .last()
+        .unwrap_or("[]");
+
+    let windows: Vec<WindowInfo> = serde_json::from_str(json_line)
+        .map_err(|e| format!("Failed to parse window list: {}", e))?;
+    Ok(windows)
+}
+
+#[tauri::command]
+fn list_cameras() -> Result<Vec<CameraInfo>, String> {
+    let facecam_dir = get_facecam_dir();
+    let (program, mut args) = get_backend_command();
+    args.push("--list-cameras".to_string());
+
+    let output = Command::new(&program)
+        .args(&args)
+        .current_dir(&facecam_dir)
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("Failed to run backend: {}", e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let json_line = stdout.lines()
+        .filter(|l| l.trim_start().starts_with('['))
+        .last()
+        .unwrap_or("[]");
+
+    let cameras: Vec<CameraInfo> = serde_json::from_str(json_line)
+        .map_err(|e| format!("Failed to parse camera list: {}", e))?;
+    Ok(cameras)
 }
 
 // ── Player Name Commands ─────────────────────────────────────────────
@@ -285,32 +338,17 @@ fn remove_player(name: String) -> Result<CommandResult, String> {
     })
 }
 
-// ── Region Selector Launch ───────────────────────────────────────────
+// ── Window Region Selector ───────────────────────────────────────────
 
 #[tauri::command]
-async fn open_region_selector(app: tauri::AppHandle) -> Result<CommandResult, String> {
+async fn open_window_region_selector(app: tauri::AppHandle, hwnd: i64) -> Result<CommandResult, String> {
     let facecam_dir = get_facecam_dir();
-    
-    // Check for bundled exe first
-    let selector_exe = facecam_dir.join("FaceCam_Backend.exe");
-    let (program, args) = if selector_exe.exists() {
-        (selector_exe.to_string_lossy().to_string(), vec!["--region-select".to_string()])
-    } else {
-        let python = if Command::new("python")
-            .arg("--version")
-            .creation_flags(0x08000000)
-            .output()
-            .map(|o| o.status.success())
-            .unwrap_or(false)
-        {
-            "python".to_string()
-        } else {
-            "python3".to_string()
-        };
-        
-        let script = facecam_dir.join("region_selector.py");
-        (python, vec![script.to_string_lossy().to_string()])
-    };
+    let (program, mut args) = get_backend_command();
+    args.push("--region-select".to_string());
+    if hwnd != 0 {
+        args.push("--hwnd".to_string());
+        args.push(hwnd.to_string());
+    }
 
     let _ = app.emit("log", LogEvent {
         level: "info".into(),
@@ -320,37 +358,23 @@ async fn open_region_selector(app: tauri::AppHandle) -> Result<CommandResult, St
     let output = Command::new(&program)
         .args(&args)
         .current_dir(&facecam_dir)
-        .creation_flags(0x00000000) // Allow window for region selector
+        .creation_flags(0x00000000)  // Allow window for region selector
         .output();
 
     match output {
         Ok(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout).to_string();
             if out.status.success() {
                 let _ = app.emit("log", LogEvent {
                     level: "success".into(),
                     message: "Region selection complete!".into(),
                 });
-                let _ = app.emit("region_updated", ());
-                Ok(CommandResult {
-                    success: true,
-                    message: stdout,
-                })
+                Ok(CommandResult { success: true, message: "Region saved".into() })
             } else {
                 let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                Ok(CommandResult {
-                    success: false,
-                    message: format!("Region selector failed: {}", stderr),
-                })
+                Ok(CommandResult { success: false, message: format!("Selector failed: {}", stderr) })
             }
         }
-        Err(e) => {
-            let _ = app.emit("log", LogEvent {
-                level: "error".into(),
-                message: format!("Failed to open region selector: {}", e),
-            });
-            Err(format!("Failed to start region selector: {}", e))
-        }
+        Err(e) => Err(format!("Failed to start region selector: {}", e)),
     }
 }
 
@@ -546,12 +570,13 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             load_config,
             save_config,
-            save_region,
+            list_windows,
+            list_cameras,
+            open_window_region_selector,
             load_players,
             save_players,
             add_player,
             remove_player,
-            open_region_selector,
             start_ocr,
             stop_ocr,
             check_backend,

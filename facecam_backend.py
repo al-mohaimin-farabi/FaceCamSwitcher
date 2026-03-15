@@ -59,6 +59,22 @@ def run_region_selector():
         print("[WARNING] No region was selected.")
 
 
+def run_list_windows():
+    """Print available windows as a JSON array."""
+    import json
+    from ocr_engine import list_windows
+    windows = list_windows()
+    print(json.dumps(windows))
+
+
+def run_list_cameras():
+    """Print available camera devices as a JSON array."""
+    import json
+    from ocr_engine import list_cameras
+    cameras = list_cameras()
+    print(json.dumps(cameras))
+
+
 def run_ocr_main():
     """Run the main OCR capture loop (headless -- no GUI window)."""
     import json
@@ -175,5 +191,9 @@ def _send_async(sender, matched):
 if __name__ == "__main__":
     if "--region-select" in sys.argv:
         run_region_selector()
+    elif "--list-windows" in sys.argv:
+        run_list_windows()
+    elif "--list-cameras" in sys.argv:
+        run_list_cameras()
     else:
         run_ocr_main()

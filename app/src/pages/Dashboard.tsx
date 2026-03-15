@@ -1,139 +1,80 @@
-import { useState, useEffect, useRef } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import LogViewer from "../components/LogViewer";
+import { useSelector, useDispatch } from "react-redux";
+import { type RootState } from "../store/store";
 import { 
-  Activity, 
-  Layout, 
-  Play, 
-  Square, 
-  BarChart3, 
-  Crosshair, 
-  Target, 
+  setConfig, updateConfigField, setIsRunning, setWindowList, setCameraList, setBackendStatus, addLog, clearLogs 
+} from "../store/appSlice";
+import {
+  Activity,
+  Play,
+  Square,
+  BarChart3,
   Zap,
-  Maximize,
   Camera,
-  ScanSearch
+  ScanSearch,
+  Monitor,
+  Video,
+  RefreshCw,
+  Target,
+  Info,
 } from "lucide-react";
 
-interface LogEntry {
-  time: string;
-  level: string;
-  message: string;
+interface WindowInfo {
+  hwnd: number;
+  title: string;
 }
 
-interface ConfigData {
-  capture_region: {
-    monitor_index: number;
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  };
-  ocr: {
-    confidence_threshold: number;
-    fuzzy_match_threshold: number;
-  };
-  capture: {
-    interval_seconds: number;
-  };
-}
-
-interface PreviewData {
-  image: string;
-  detections: {
-    raw_text: string;
-    matched_name: string | null;
-    confidence: number;
-    match_score: number;
-  }[];
+interface CameraInfo {
+  index: number;
+  name: string;
 }
 
 export default function Dashboard() {
-  const [isRunning, setIsRunning] = useState(false);
-  const [logs, setLogs] = useState<LogEntry[]>([]);
-  const [config, setConfig] = useState<ConfigData | null>(null);
-  const [backendStatus, setBackendStatus] = useState<string>("Checking...");
-  const [backendOk, setBackendOk] = useState(false);
-  const [stats, setStats] = useState({ scans: 0, detections: 0, matches: 0 });
+  const dispatch = useDispatch();
+  const {
+    config,
+    isRunning,
+    logs,
+    stats,
+    previewData,
+    windowList,
+    cameraList,
+    backendOk,
+    backendStatus
+  } = useSelector((state: RootState) => state.app);
+
+  const [isRefreshingWindows, setIsRefreshingWindows] = useState(false);
+  const [isRefreshingCameras, setIsRefreshingCameras] = useState(false);
   const [isSelectingRegion, setIsSelectingRegion] = useState(false);
-  const [previewData, setPreviewData] = useState<PreviewData | null>(null);
 
-  // Load config and check backend on mount
   useEffect(() => {
-    loadConfig();
-    checkBackend();
-
-    // Listen for log events from Tauri backend
-    const unlistenLog = listen<{ level: string; message: string }>("log", (event) => {
-      if (event.payload.level === "preview") {
-        try {
-          setPreviewData(JSON.parse(event.payload.message));
-        } catch (e) {
-          console.error("Preview parse error", e);
-        }
-        return;
-      }
-
-      const now = new Date();
-      const time = now.toLocaleTimeString("en-US", { hour12: false });
-      addLog({ time, level: event.payload.level, message: event.payload.message });
-
-      // Track stats from log messages
-      if (event.payload.message.includes("detected") || event.payload.message.includes("OCR")) {
-        setStats((prev) => ({ ...prev, scans: prev.scans + 1 }));
-      }
-      if (event.payload.message.includes("→") && event.payload.message.includes("match")) {
-        setStats((prev) => ({ ...prev, matches: prev.matches + 1 }));
-      }
-    });
-
-    const unlistenStop = listen("ocr_stopped", () => {
-      setIsRunning(false);
-      setPreviewData(null);
-    });
-
-    const unlistenRegion = listen("region_updated", () => {
+    if (!config) {
       loadConfig();
-      addLog({
-        time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-        level: "success",
-        message: "Region updated successfully!",
-      });
-    });
-
-    return () => {
-      unlistenLog.then((fn) => fn());
-      unlistenStop.then((fn) => fn());
-      unlistenRegion.then((fn) => fn());
-    };
+    }
+    checkBackend();
+    
+    // Auto-refresh lists if empty
+    if (windowList.length === 0) handleRefreshWindows();
+    if (cameraList.length === 0) handleRefreshCameras();
   }, []);
-
-  const addLog = (entry: LogEntry) => {
-    setLogs((prev) => [...prev.slice(-200), entry]); // Keep last 200
-  };
 
   const loadConfig = async () => {
     try {
-      const cfg = await invoke<ConfigData>("load_config");
-      setConfig(cfg);
+      const cfg = await invoke<any>("load_config");
+      dispatch(setConfig(cfg));
     } catch (e) {
-      addLog({
-        time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-        level: "error",
-        message: `Failed to load config: ${e}`,
-      });
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to load config: ${e}` }));
     }
   };
 
   const checkBackend = async () => {
     try {
       const result = await invoke<{ success: boolean; message: string }>("check_backend");
-      setBackendStatus(result.message);
-      setBackendOk(result.success);
-    } catch (e) {
-      setBackendStatus("Backend unavailable");
-      setBackendOk(false);
+      dispatch(setBackendStatus({ ok: result.success, message: result.message }));
+    } catch {
+      dispatch(setBackendStatus({ ok: false, message: "Backend unavailable" }));
     }
   };
 
@@ -141,179 +82,338 @@ export default function Dashboard() {
     if (isRunning) {
       try {
         await invoke("stop_ocr");
-        setIsRunning(false);
+        dispatch(setIsRunning(false));
       } catch (e) {
-        addLog({
-          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-          level: "error",
-          message: `Failed to stop OCR: ${e}`,
-        });
+        dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to stop OCR: ${e}` }));
       }
     } else {
       try {
         await invoke("start_ocr");
-        setIsRunning(true);
-        setStats({ scans: 0, detections: 0, matches: 0 });
-        setPreviewData(null);
+        dispatch(setIsRunning(true));
       } catch (e) {
-        addLog({
-          time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-          level: "error",
-          message: `Failed to start OCR: ${e}`,
-        });
+        dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to start OCR: ${e}` }));
       }
     }
   };
 
-  const handleSelectRegion = async () => {
+  const handleRefreshWindows = async () => {
+    setIsRefreshingWindows(true);
+    try {
+      const windows = await invoke<WindowInfo[]>("list_windows");
+      dispatch(setWindowList(windows));
+    } catch (e) {
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to list windows: ${e}` }));
+    } finally {
+      setIsRefreshingWindows(false);
+    }
+  };
+
+  const handleRefreshCameras = async () => {
+    setIsRefreshingCameras(true);
+    try {
+      const cameras = await invoke<CameraInfo[]>("list_cameras");
+      dispatch(setCameraList(cameras));
+    } catch (e) {
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to list cameras: ${e}` }));
+    } finally {
+      setIsRefreshingCameras(false);
+    }
+  };
+
+  const handleSelectWindowRegion = async () => {
     setIsSelectingRegion(true);
     try {
-      await invoke("open_region_selector");
+      const hwnd = config?.input_source?.window_hwnd ?? 0;
+      await invoke("open_window_region_selector", { hwnd });
+      await loadConfig();
     } catch (e) {
-      addLog({
-        time: new Date().toLocaleTimeString("en-US", { hour12: false }),
-        level: "error",
-        message: `Region selector error: ${e}`,
-      });
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Region Selector Error: ${e}` }));
     } finally {
       setIsSelectingRegion(false);
     }
   };
 
-  const region = config?.capture_region;
+  const handleSelectCameraRegion = async () => {
+    setIsSelectingRegion(true);
+    try {
+      await invoke("open_region_selector");
+      await loadConfig();
+    } catch (e) {
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Selector Error: ${e}` }));
+    } finally {
+      setIsSelectingRegion(false);
+    }
+  };
+
+  const updateConfigValue = async (path: string, value: any) => {
+    if (!config) return;
+    try {
+      const cfg = await invoke<any>("load_config");
+      const parts = path.split(".");
+      let obj: any = cfg;
+      for (let i = 0; i < parts.length - 1; i++) {
+        obj = obj[parts[i]];
+      }
+      obj[parts[parts.length - 1]] = value;
+      await invoke("save_config", { config: cfg });
+      await loadConfig();
+    } catch (e) {
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to update config: ${e}` }));
+    }
+  };
+
+  const handleSelectWindow = async (hwnd: number, title: string) => {
+    // Optimistic update
+    dispatch(updateConfigField({ path: "input_source.type", value: "window" }));
+    dispatch(updateConfigField({ path: "input_source.window_hwnd", value: hwnd }));
+    dispatch(updateConfigField({ path: "input_source.window_title", value: title }));
+
+    try {
+      const cfg = await invoke<any>("load_config");
+      cfg.input_source = { ...cfg.input_source, type: "window", window_hwnd: hwnd, window_title: title };
+      await invoke("save_config", { config: cfg });
+    } catch (e) {
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to save window: ${e}` }));
+    }
+  };
+
+  const handleSelectCamera = async (index: number) => {
+    // Optimistic update
+    dispatch(updateConfigField({ path: "input_source.type", value: "camera" }));
+    dispatch(updateConfigField({ path: "input_source.camera_index", value: index }));
+
+    try {
+      const cfg = await invoke<any>("load_config");
+      cfg.input_source = { ...cfg.input_source, type: "camera", camera_index: index };
+      await invoke("save_config", { config: cfg });
+    } catch (e) {
+      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to save camera: ${e}` }));
+    }
+  };
+
+  const handleSwitchMode = async (mode: "window" | "camera") => {
+    // Optimistic update
+    dispatch(updateConfigField({ path: "input_source.type", value: mode }));
+
+    try {
+      const cfg = await invoke<any>("load_config");
+      cfg.input_source = { ...cfg.input_source, type: mode };
+      await invoke("save_config", { config: cfg });
+    } catch {}
+  };
+
+  const src = config?.input_source;
+  const srcType = src?.type ?? "window";
 
   return (
-    <div
-      style={{
-        display: "flex",
-        height: "100%",
-        padding: "16px",
-        gap: "16px",
-      }}
-      className="animate-fade-in"
-    >
+    <div style={{ display: "flex", height: "100%", padding: "16px", gap: "16px" }} className="animate-fade-in">
+
       {/* ── Left Panel ─────────────────────────── */}
       <div style={{ width: 340, flexShrink: 0, display: "flex", flexDirection: "column", gap: 12 }}>
-        {/* Status Card */}
+
+        {/* System Status */}
         <div className="glass-card" style={{ padding: 18 }}>
           <div className="section-header">
             <Activity size={14} className="icon" /> System Status
           </div>
           <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
             <span className={`status-dot ${backendOk ? "online" : "error"}`} />
-            <span
-              style={{
-                fontSize: 12,
-                color: backendOk ? "var(--green)" : "var(--red)",
-                fontWeight: 600,
-              }}
-            >
+            <span style={{ fontSize: 12, color: backendOk ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
               {backendOk ? "Backend Ready" : "Backend Unavailable"}
             </span>
           </div>
-          <p style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
-            {backendStatus}
-          </p>
+          <p style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{backendStatus}</p>
         </div>
 
-        {/* Region Info Card */}
+        {/* Input Source Card */}
         <div className="glass-card" style={{ padding: 18 }}>
           <div className="section-header">
-            <Maximize size={14} className="icon" /> Capture Region
+            <Monitor size={14} className="icon" /> Input Source
           </div>
-          {region ? (
-            <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-              <div className="grid-2">
-                <div className="stat-card" style={{ padding: 10 }}>
-                  <div className="value" style={{ fontSize: 16 }}>
-                    {region.monitor_index}
-                  </div>
-                  <div className="label">Monitor</div>
-                </div>
-                <div className="stat-card" style={{ padding: 10 }}>
-                  <div className="value" style={{ fontSize: 16 }}>
-                    {region.width}×{region.height}
-                  </div>
-                  <div className="label">Size</div>
-                </div>
-              </div>
-              <p
+
+          {/* Mode tabs */}
+          <div style={{ display: "flex", gap: 6, padding: 4, background: "rgba(255,255,255,0.04)", borderRadius: 10, border: "1px solid var(--border)", marginBottom: 14 }}>
+            {(["window", "camera"] as const).map((mode) => (
+              <button
+                key={mode}
+                onClick={() => handleSwitchMode(mode)}
                 style={{
-                  fontSize: 11,
-                  color: "var(--text-muted)",
-                  fontFamily: '"JetBrains Mono", monospace',
-                  textAlign: "center",
+                  flex: 1, padding: "7px 0", borderRadius: 7, border: "none", cursor: "pointer",
+                  background: srcType === mode ? "var(--accent)" : "transparent",
+                  color: srcType === mode ? "white" : "var(--text-muted)",
+                  fontWeight: 600, fontSize: 12,
+                  display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
+                  transition: "all 0.2s ease",
                 }}
               >
-                Position: ({region.left}, {region.top})
-              </p>
-            </div>
-          ) : (
-            <p style={{ fontSize: 12, color: "var(--text-muted)", textAlign: "center", padding: 12 }}>
-              No region configured
-            </p>
-          )}
-            <button
-              className="btn btn-accent"
-              style={{ width: "100%", marginTop: 10 }}
-              onClick={handleSelectRegion}
-              disabled={isSelectingRegion}
-            >
-              {isSelectingRegion ? (
-                <>
-                  <span style={{ animation: "spin 1s linear infinite", display: "inline-block" }}>⟳</span>
-                  Selecting...
-                </>
-              ) : (
-                <>
-                  <Maximize size={14} /> Select Region
-                </>
-              )}
-            </button>
-    </div>
+                {mode === "window" ? <Monitor size={13} /> : <Video size={13} />}
+                {mode === "window" ? "Window" : "Virtual Camera"}
+              </button>
+            ))}
+          </div>
 
-    {/* Controls Card */}
+          {/* Window mode */}
+          {srcType === "window" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select
+                  className="input"
+                  style={{ flex: 1, fontSize: 12 }}
+                  value={src?.window_hwnd ?? 0}
+                  onChange={(e) => {
+                    const hwnd = parseInt(e.target.value) || 0;
+                    const win = windowList.find((w) => w.hwnd === hwnd);
+                    if (win) handleSelectWindow(win.hwnd, win.title);
+                  }}
+                >
+                  <option value={0}>— Select a window —</option>
+                  {windowList.map((w) => (
+                    <option key={w.hwnd} value={w.hwnd}>{w.title}</option>
+                  ))}
+                </select>
+                <button
+                  className="btn btn-accent"
+                  style={{ height: 36, padding: "0 10px", borderRadius: 8, flexShrink: 0 }}
+                  onClick={handleRefreshWindows}
+                  disabled={isRefreshingWindows}
+                  title="Refresh window list"
+                >
+                  <RefreshCw size={13} className={isRefreshingWindows ? "animate-spin" : ""} />
+                </button>
+              </div>
+              {src?.window_title ? (
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -2 }}>
+                  {src.window_title}
+                </p>
+              ) : (
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -2 }}>
+                  Click refresh then select a window
+                </p>
+              )}
+
+              {/* Region Inputs */}
+              <div style={{ marginTop: 6 }}>
+                <label style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>
+                  Capture Region
+                </label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {(["left", "top", "width", "height"] as const).map((field) => (
+                    <div className="input-group" key={field} style={{ marginBottom: 0 }}>
+                      <label style={{ fontSize: 10, textTransform: "capitalize" }}>{field === "left" ? "X Offset" : field === "top" ? "Y Offset" : field}</label>
+                      <input
+                        className="input"
+                        type="number"
+                        style={{ fontSize: 12, padding: "6px 10px" }}
+                        value={src?.window_region?.[field] ?? 0}
+                        onChange={(e) => updateConfigValue(`input_source.window_region.${field}`, parseInt(e.target.value) || 0)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                className="btn btn-accent"
+                style={{ width: "100%", height: 34, borderRadius: 8, fontSize: 12, marginTop: 4 }}
+                onClick={handleSelectWindowRegion}
+                disabled={isSelectingRegion || !(src?.window_hwnd)}
+              >
+                {isSelectingRegion ? (
+                  <RefreshCw size={13} className="animate-spin" />
+                ) : (
+                  <><Target size={13} /> Select Region in Window</>
+                )}
+              </button>
+            </div>
+          )}
+
+          {/* Camera mode */}
+          {srcType === "camera" && (
+            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+              <div style={{ display: "flex", gap: 8 }}>
+                <select
+                  className="input"
+                  style={{ flex: 1, fontSize: 12 }}
+                  value={src?.camera_index ?? 0}
+                  onChange={(e) => handleSelectCamera(parseInt(e.target.value) || 0)}
+                >
+                  {cameraList.length === 0 ? (
+                    <option value={0}>Camera 0 (default)</option>
+                  ) : (
+                    cameraList.map((c) => (
+                      <option key={c.index} value={c.index}>{c.name}</option>
+                    ))
+                  )}
+                </select>
+                <button
+                  className="btn btn-accent"
+                  style={{ height: 36, padding: "0 10px", borderRadius: 8, flexShrink: 0 }}
+                  onClick={handleRefreshCameras}
+                  disabled={isRefreshingCameras}
+                  title="Detect cameras"
+                >
+                  <RefreshCw size={13} className={isRefreshingCameras ? "animate-spin" : ""} />
+                </button>
+              </div>
+
+              {/* Region Inputs */}
+              <div style={{ marginTop: 6 }}>
+                <label style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>
+                  Capture Region
+                </label>
+                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                  {(["left", "top", "width", "height"] as const).map((field) => (
+                    <div className="input-group" key={field} style={{ marginBottom: 0 }}>
+                      <label style={{ fontSize: 10, textTransform: "capitalize" }}>{field === "left" ? "X Offset" : field === "top" ? "Y Offset" : field}</label>
+                      <input
+                        className="input"
+                        type="number"
+                        style={{ fontSize: 12, padding: "6px 10px" }}
+                        value={src?.window_region?.[field] ?? 0}
+                        onChange={(e) => updateConfigValue(`input_source.window_region.${field}`, parseInt(e.target.value) || 0)}
+                      />
+                    </div>
+                  ))}
+                </div>
+              </div>
+
+              <button
+                className="btn btn-accent"
+                style={{ width: "100%", height: 34, borderRadius: 8, fontSize: 12, marginTop: 4 }}
+                onClick={handleSelectCameraRegion}
+                disabled={isSelectingRegion}
+              >
+                {isSelectingRegion ? (
+                  <RefreshCw size={13} className="animate-spin" />
+                ) : (
+                  <><Target size={13} /> Select Global Region</>
+                )}
+              </button>
+            </div>
+          )}
+        </div>
+
+        {/* Controls Card */}
         <div className="glass-card" style={{ padding: 18 }}>
           <div className="section-header">
             <Zap size={14} className="icon" /> Controls
           </div>
-          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-            <button
-              className={`btn ${isRunning ? "btn-danger" : "btn-success"}`}
-              style={{ width: "100%", height: 48, fontSize: 14, fontWeight: 700 }}
-              onClick={handleStartStop}
-              disabled={!backendOk}
-            >
-              {isRunning ? (
-                <>
-                  <Square size={16} fill="currentColor" /> Stop Capture
-                </>
-              ) : (
-                <>
-                  <Play size={16} fill="currentColor" /> Start Capture
-                </>
-              )}
-            </button>
-          </div>
-
+          <button
+            className={`btn ${isRunning ? "btn-danger" : "btn-success"}`}
+            style={{ width: "100%", height: 48, fontSize: 14, fontWeight: 700 }}
+            onClick={handleStartStop}
+            disabled={!backendOk}
+          >
+            {isRunning ? (
+              <><Square size={16} fill="currentColor" /> Stop Capture</>
+            ) : (
+              <><Play size={16} fill="currentColor" /> Start Capture</>
+            )}
+          </button>
           {isRunning && (
-            <div
-              style={{
-                marginTop: 12,
-                padding: "8px 12px",
-                borderRadius: 8,
-                background: "var(--green-bg)",
-                border: "1px solid rgba(34, 197, 94, 0.2)",
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-              }}
-              className="animate-fade-in"
-            >
+            <div style={{ marginTop: 12, padding: "8px 12px", borderRadius: 8, background: "var(--green-bg)", border: "1px solid rgba(34,197,94,0.2)", display: "flex", alignItems: "center", gap: 8 }} className="animate-fade-in">
               <span className="status-dot online" />
-              <span style={{ fontSize: 12, color: "var(--green)", fontWeight: 600 }}>
-                OCR Running
-              </span>
+              <span style={{ fontSize: 12, color: "var(--green)", fontWeight: 600 }}>OCR Running</span>
             </div>
           )}
         </div>
@@ -324,78 +424,55 @@ export default function Dashboard() {
             <BarChart3 size={14} className="icon" /> Session Stats
           </div>
           <div className="grid-3">
-            <div className="stat-card" style={{ padding: 10 }}>
-              <div className="value" style={{ fontSize: 18, color: "var(--accent)" }}>
-                {stats.scans}
+            {[
+              { label: "Scans", value: stats.scans, color: "var(--accent)" },
+              { label: "Detected", value: stats.detections, color: "var(--cyan)" },
+              { label: "Matches", value: stats.matches, color: "var(--green)" },
+            ].map(({ label, value, color }) => (
+              <div key={label} className="stat-card" style={{ padding: 10 }}>
+                <div className="value" style={{ fontSize: 18, color }}>{value}</div>
+                <div className="label">{label}</div>
               </div>
-              <div className="label">Scans</div>
-            </div>
-            <div className="stat-card" style={{ padding: 10 }}>
-              <div className="value" style={{ fontSize: 18, color: "var(--cyan)" }}>
-                {stats.detections}
-              </div>
-              <div className="label">Detected</div>
-            </div>
-            <div className="stat-card" style={{ padding: 10 }}>
-              <div className="value" style={{ fontSize: 18, color: "var(--green)" }}>
-                {stats.matches}
-              </div>
-              <div className="label">Matches</div>
-            </div>
+            ))}
           </div>
         </div>
       </div>
 
-      {/* ── Right Panel: Preview & Logs ────────────── */}
+      {/* ── Right Panel ────────────── */}
       <div style={{ flex: 1, display: "flex", flexDirection: "column", gap: 16, overflow: "hidden" }}>
-        
-        {/* Preview Grid (top half) */}
+
+        {/* Preview Grid */}
         <div style={{ display: "flex", gap: 16, height: 180, flexShrink: 0 }}>
-          {/* Capture Box */}
           <div className="glass-card" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
             <div className="section-header" style={{ padding: "12px 16px", marginBottom: 0, borderBottom: "1px solid var(--border)" }}>
-              <Camera size={15} className="icon" style={{ marginTop: -2 }} /> 
+              <Camera size={15} className="icon" style={{ marginTop: -2 }} />
               <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5 }}>CAPTURE PREVIEW</span>
             </div>
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, background: "rgba(0,0,0,0.15)" }}>
               {previewData?.image ? (
-                <img 
-                  src={`data:image/png;base64,${previewData.image}`} 
-                  alt="Capture" 
-                  style={{ 
-                    maxWidth: "100%", 
-                    maxHeight: "100%", 
-                    objectFit: "contain", 
-                    border: "2px solid rgba(255,255,255,0.05)", 
-                    borderRadius: 4 
-                  }} 
-                />
+                <img src={`data:image/png;base64,${previewData.image}`} alt="Capture"
+                  style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", border: "2px solid rgba(255,255,255,0.05)", borderRadius: 4 }} />
               ) : (
                 <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Waiting for capture...</div>
               )}
             </div>
           </div>
 
-          {/* Detection Box */}
           <div className="glass-card" style={{ flex: 1, display: "flex", flexDirection: "column" }}>
             <div className="section-header" style={{ padding: "12px 16px", marginBottom: 0, borderBottom: "1px solid var(--border)" }}>
-              <ScanSearch size={15} className="icon" style={{ marginTop: -2 }} /> 
+              <ScanSearch size={15} className="icon" style={{ marginTop: -2 }} />
               <span style={{ fontSize: 11, fontWeight: 700, letterSpacing: 0.5 }}>CURRENT DETECTION</span>
             </div>
             <div style={{ flex: 1, display: "flex", flexDirection: "column", justifyContent: "center", padding: "12px 20px", overflow: "hidden" }}>
               {previewData?.detections && previewData.detections.length > 0 ? (
                 previewData.detections.map((d, i) => (
-                  <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4, animation: "fadeIn 0.2s ease-out" }}>
-                     <div style={{ 
-                        fontSize: 22, 
-                        fontWeight: 800, 
-                        color: d.matched_name ? "var(--green)" : "var(--accent)" 
-                      }}>
-                       {d.matched_name || "NO MATCH"}
-                     </div>
-                     <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: '"JetBrains Mono", monospace' }}>
-                       "{d.raw_text}" (Conf: {(d.confidence * 100).toFixed(0)}%, Fuzz: {d.match_score}%)
-                     </div>
+                  <div key={i} style={{ display: "flex", flexDirection: "column", gap: 4 }}>
+                    <div style={{ fontSize: 22, fontWeight: 800, color: d.matched_name ? "var(--green)" : "var(--accent)" }}>
+                      {d.matched_name || "NO MATCH"}
+                    </div>
+                    <div style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: '"JetBrains Mono", monospace' }}>
+                      "{d.raw_text}" (Conf: {(d.confidence * 100).toFixed(0)}%, Fuzz: {d.match_score}%)
+                    </div>
                   </div>
                 ))
               ) : previewData ? (
@@ -407,9 +484,9 @@ export default function Dashboard() {
           </div>
         </div>
 
-        {/* Log Viewer (bottom half) */}
+        {/* Log Viewer */}
         <div style={{ flex: 1, display: "flex", flexDirection: "column", minHeight: 0 }}>
-          <LogViewer logs={logs} onClear={() => setLogs([])} />
+          <LogViewer logs={logs} onClear={() => dispatch(clearLogs())} />
         </div>
       </div>
     </div>

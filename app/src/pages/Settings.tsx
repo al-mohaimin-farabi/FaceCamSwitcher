@@ -1,72 +1,46 @@
-﻿import { useState, useEffect } from "react";
+import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { 
-  Sliders, 
-  Target, 
-  Globe, 
-  Maximize, 
-  Save, 
-  Info, 
+import { useSelector, useDispatch } from "react-redux";
+import { type RootState } from "../store/store";
+import { setConfig, updateConfigField, type AppConfig } from "../store/appSlice";
+import {
+  Sliders,
+  Target,
+  Globe,
+  Save,
+  Info,
   RefreshCw,
-  X,
   Clock,
-  Settings as SettingsIcon,
   CheckCircle2,
   AlertCircle,
-  Database,
   Camera,
-  Cpu
+  Cpu,
+  Monitor,
+  Video,
 } from "lucide-react";
 
-interface AppConfig {
-  capture_region: {
-    monitor_index: number;
-    left: number;
-    top: number;
-    width: number;
-    height: number;
-  };
-  server: {
-    url: string;
-    method: string;
-    headers: Record<string, string>;
-    timeout: number;
-    retry_count: number;
-    retry_delay: number;
-  };
-  ocr: {
-    language: string;
-    confidence_threshold: number;
-    fuzzy_match_threshold: number;
-    use_gpu: boolean;
-  };
-  capture: {
-    interval_seconds: number;
-    save_debug_screenshots: boolean;
-    debug_screenshot_dir: string;
-  };
-}
-
 export default function Settings() {
-  const [config, setConfig] = useState<AppConfig | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
+  const dispatch = useDispatch();
+  const { config } = useSelector((state: RootState) => state.app);
+  const [isLoadingProps, setIsLoadingProps] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
-  const [isSelectingRegion, setIsSelectingRegion] = useState(false);
 
   useEffect(() => {
-    loadConfig();
+    if (!config) {
+      loadConfig();
+    }
   }, []);
 
   const loadConfig = async () => {
-    setIsLoading(true);
+    setIsLoadingProps(true);
     try {
       const cfg = await invoke<AppConfig>("load_config");
-      setConfig(cfg);
+      dispatch(setConfig(cfg));
     } catch (e) {
       showMessage(`Failed to load config: ${e}`, "error");
     } finally {
-      setIsLoading(false);
+      setIsLoadingProps(false);
     }
   };
 
@@ -88,31 +62,11 @@ export default function Settings() {
     }
   };
 
-  const handleSelectRegion = async () => {
-    setIsSelectingRegion(true);
-    try {
-      await invoke("open_region_selector");
-      loadConfig();
-    } catch (e) {
-      showMessage(`Selector Error: ${e}`, "error");
-    } finally {
-      setIsSelectingRegion(false);
-    }
-  };
-
   const updateConfig = (path: string, value: any) => {
-    if (!config) return;
-    const newConfig = JSON.parse(JSON.stringify(config));
-    const parts = path.split(".");
-    let obj: any = newConfig;
-    for (let i = 0; i < parts.length - 1; i++) {
-      obj = obj[parts[i]];
-    }
-    obj[parts[parts.length - 1]] = value;
-    setConfig(newConfig);
+    dispatch(updateConfigField({ path, value }));
   };
 
-  if (isLoading || !config) {
+  if (isLoadingProps || !config) {
     return (
       <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 20 }}>
         <RefreshCw size={32} className="animate-spin" style={{ color: "var(--accent)" }} />
@@ -172,75 +126,7 @@ export default function Settings() {
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-        {/* ── Capture Region ──────────── */}
-        <div className="glass-card" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
-          <div className="section-header" style={{ marginBottom: 0 }}>
-            <Maximize size={16} className="icon" /> Capture Surface
-          </div>
-          
-          <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
-            <div className="input-group">
-              <label>Monitor</label>
-              <input
-                className="input"
-                type="number"
-                value={config.capture_region.monitor_index}
-                onChange={(e) => updateConfig("capture_region.monitor_index", parseInt(e.target.value) || 0)}
-              />
-            </div>
-            <div className="input-group">
-              <label>X Offset</label>
-              <input
-                className="input"
-                type="number"
-                value={config.capture_region.left}
-                onChange={(e) => updateConfig("capture_region.left", parseInt(e.target.value) || 0)}
-              />
-            </div>
-            <div className="input-group">
-              <label>Y Offset</label>
-              <input
-                className="input"
-                type="number"
-                value={config.capture_region.top}
-                onChange={(e) => updateConfig("capture_region.top", parseInt(e.target.value) || 0)}
-              />
-            </div>
-            <div className="input-group">
-              <label>Width</label>
-              <input
-                className="input"
-                type="number"
-                value={config.capture_region.width}
-                onChange={(e) => updateConfig("capture_region.width", parseInt(e.target.value) || 100)}
-              />
-            </div>
-            <div className="input-group">
-              <label>Height</label>
-              <input
-                className="input"
-                type="number"
-                value={config.capture_region.height}
-                onChange={(e) => updateConfig("capture_region.height", parseInt(e.target.value) || 50)}
-              />
-            </div>
-          </div>
 
-          <button
-            className="btn btn-accent"
-            style={{ width: "100%", height: 38, borderRadius: "8px" }}
-            onClick={handleSelectRegion}
-            disabled={isSelectingRegion}
-          >
-            {isSelectingRegion ? (
-              <RefreshCw size={14} className="animate-spin" />
-            ) : (
-              <>
-                <Target size={14} /> Interactive Region Selection
-              </>
-            )}
-          </button>
-        </div>
 
         {/* ── OCR Parameters ────────────── */}
         <div className="glass-card" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>

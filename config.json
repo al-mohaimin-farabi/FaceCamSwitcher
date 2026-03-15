@@ -1,31 +1,36 @@
 {
-    "capture_region": {
-        "monitor_index": 3,
-        "left": 2964,
-        "top": 1590,
-        "width": 133,
-        "height": 26
+  "input_source": {
+    "type": "window",
+    "window_hwnd": 66568,
+    "window_title": "Work | WorkZone - Discord",
+    "window_region": {
+      "left": 0,
+      "top": 0,
+      "width": 530,
+      "height": 193
     },
-    "server": {
-        "url": "http://localhost:3000/api/facecam",
-        "method": "POST",
-        "headers": {
-            "Authorization": "Bearer YOUR_API_KEY_HERE",
-            "Content-Type": "application/json"
-        },
-        "timeout": 2,
-        "retry_count": 1,
-        "retry_delay": 0.5
+    "camera_index": 2
+  },
+  "server": {
+    "url": "http://localhost:3000/api/facecam",
+    "method": "POST",
+    "headers": {
+      "Authorization": "Bearer YOUR_API_KEY_HERE",
+      "Content-Type": "application/json"
     },
-    "ocr": {
-        "language": "en",
-        "confidence_threshold": 0.6,
-        "fuzzy_match_threshold": 70,
-        "use_gpu": false
-    },
-    "capture": {
-        "interval_seconds": 1,
-        "save_debug_screenshots": false,
-        "debug_screenshot_dir": "debug_captures"
-    }
+    "timeout": 2,
+    "retry_count": 1,
+    "retry_delay": 0.5
+  },
+  "ocr": {
+    "language": "en",
+    "confidence_threshold": 0.6,
+    "fuzzy_match_threshold": 70,
+    "use_gpu": false
+  },
+  "capture": {
+    "interval_seconds": 1,
+    "save_debug_screenshots": false,
+    "debug_screenshot_dir": "debug_captures"
+  }
 }

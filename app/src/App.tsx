@@ -1,13 +1,48 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import Dashboard from "./pages/Dashboard";
 import PlayerNames from "./pages/PlayerNames";
 import Settings from "./pages/Settings";
 import { LayoutDashboard, Users, Settings as SettingsIcon } from "lucide-react";
+import { useDispatch } from "react-redux";
+import { listen } from "@tauri-apps/api/event";
+import { addLog, incrementScans, incrementMatches, setPreviewData, setIsRunning } from "./store/appSlice";
 
 type Page = "dashboard" | "players" | "settings";
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
+  const dispatch = useDispatch();
+
+  useEffect(() => {
+    // Global Tauri event listeners mapped to Redux
+    const unlistenLog = listen<{ level: string; message: string }>("log", (event) => {
+      if (event.payload.level === "preview") {
+        try { 
+          const data = JSON.parse(event.payload.message);
+          dispatch(setPreviewData(data));
+        } catch {}
+        return;
+      }
+      const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+      dispatch(addLog({ time, level: event.payload.level, message: event.payload.message }));
+
+      if (event.payload.message.includes("detected") || event.payload.message.includes("OCR")) {
+        dispatch(incrementScans());
+      }
+      if (event.payload.message.includes("→") && event.payload.message.includes("match")) {
+        dispatch(incrementMatches());
+      }
+    });
+
+    const unlistenStop = listen("ocr_stopped", () => {
+      dispatch(setIsRunning(false));
+    });
+
+    return () => {
+      unlistenLog.then((fn) => fn());
+      unlistenStop.then((fn) => fn());
+    };
+  }, [dispatch]);
 
   return (
     <div className="gradient-bg" style={{ height: "100vh", display: "flex", flexDirection: "column" }}>

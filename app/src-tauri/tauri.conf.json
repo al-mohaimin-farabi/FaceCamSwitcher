@@ -13,10 +13,10 @@
     "windows": [
       {
         "title": "Efinity FaceCam",
-        "width": 1050,
-        "height": 700,
-        "minWidth": 850,
-        "minHeight": 600,
+        "width": 1150,
+        "height": 920,
+        "minWidth": 950,
+        "minHeight": 750,
         "center": true,
         "decorations": true,
         "resizable": true
