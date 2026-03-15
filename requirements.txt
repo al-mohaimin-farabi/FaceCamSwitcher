@@ -1,0 +1,7 @@
+paddlepaddle
+paddleocr
+mss
+Pillow
+requests
+thefuzz
+python-Levenshtein
