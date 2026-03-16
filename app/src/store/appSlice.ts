@@ -11,10 +11,6 @@ export interface WindowInfo {
   title: string;
 }
 
-export interface CameraInfo {
-  index: number;
-  name: string;
-}
 
 export interface AppConfig {
   input_source: {
@@ -71,7 +67,6 @@ interface AppState {
   };
   previewData: PreviewData | null;
   windowList: WindowInfo[];
-  cameraList: CameraInfo[];
   backendOk: boolean;
   backendStatus: string;
 }
@@ -83,7 +78,6 @@ const initialState: AppState = {
   stats: { scans: 0, detections: 0, matches: 0 },
   previewData: null,
   windowList: [],
-  cameraList: [],
   backendOk: false,
   backendStatus: "Checking...",
 };
@@ -134,9 +128,6 @@ export const appSlice = createSlice({
     setWindowList: (state, action: PayloadAction<WindowInfo[]>) => {
       state.windowList = action.payload;
     },
-    setCameraList: (state, action: PayloadAction<CameraInfo[]>) => {
-      state.cameraList = action.payload;
-    },
     setBackendStatus: (state, action: PayloadAction<{ ok: boolean; message: string }>) => {
       state.backendOk = action.payload.ok;
       state.backendStatus = action.payload.message;
@@ -154,7 +145,6 @@ export const {
   incrementMatches,
   setPreviewData,
   setWindowList,
-  setCameraList,
   setBackendStatus,
 } = appSlice.actions;
 

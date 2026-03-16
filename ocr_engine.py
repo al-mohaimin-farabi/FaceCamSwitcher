@@ -12,7 +12,9 @@ import json
 import logging
 import os
 import re
+import sys
 import warnings
+from pathlib import Path
 
 # ── Suppress ALL noise BEFORE importing paddle/paddleocr ──────────────
 warnings.filterwarnings("ignore")
@@ -22,9 +24,22 @@ os.environ["PADDLEX_LOG_LEVEL"]  = "40"
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 os.environ["FLAGS_call_stack_level"] = "0"
 
+# ── Force matplotlib to use a non-GUI backend so tkinter is never imported ──
+import matplotlib
+matplotlib.use('Agg')
+
+# ── Force DPI Awareness on Windows (Critical for correct screen capture/coords) ──
+if os.name == 'nt':
+    try:
+        import ctypes
+        # Set DPI awareness for Windows 8.1+ -> Per-Monitor DPI aware
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)
+    except Exception as e:
+        pass
+
+import numpy as np
 import time
 from datetime import datetime
-from pathlib import Path
 from typing import Optional
 
 import mss
@@ -79,39 +94,17 @@ def list_windows() -> list[dict]:
         return []
 
 
-def list_cameras() -> list[dict]:
-    """
-    Enumerate DirectShow video capture devices and return [{index, name}].
-    Uses pygrabber to get real device names (OBS Virtual Camera, vMix Video, etc.).
-    Falls back to cv2 probing if pygrabber is unavailable.
-    """
-    # ── Primary: pygrabber gives real DirectShow device names ──────────
-    try:
-        from pygrabber.dshow_graph import FilterGraph
-        graph = FilterGraph()
-        names = graph.get_input_devices()
-        return [{"index": i, "name": name} for i, name in enumerate(names)]
-    except Exception:
-        pass
-
-    # ── Fallback: cv2 probing (names will be generic "Camera N") ───────
-    try:
-        import cv2
-        cameras = []
-        for i in range(10):
-            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
-            if cap.isOpened():
-                cameras.append({"index": i, "name": f"Camera {i}"})
-                cap.release()
-        return cameras
-    except ImportError:
-        return []
-
-
 # ──────────────────────────────────────────────────────────────────────
-# Paths
+# Paths — prefer FACECAM_DATA_DIR (set by Tauri frontend) so the engine
+# reads config/players from the writable AppData directory in production.
 # ──────────────────────────────────────────────────────────────────────
-BASE_DIR = Path(__file__).parent
+if os.environ.get("FACECAM_DATA_DIR"):
+    BASE_DIR = Path(os.environ["FACECAM_DATA_DIR"])
+elif getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
+
 CONFIG_PATH = BASE_DIR / "config.json"
 PLAYERS_FILE = BASE_DIR / "Players Name.txt"
 
@@ -182,12 +175,11 @@ class OCREngine:
         self.player_names = _load_player_names()
         print(f"[OCR] Loaded {len(self.player_names)} player name(s) from {PLAYERS_FILE.name}")
 
-        # Input source from config (new) — falls back to legacy capture_region
+        # Input source from config
         src = self.config.get("input_source", {})
         if src:
             self.input_source = src
         else:
-            # Legacy migration: wrap capture_region into input_source
             region = self.config.get("capture_region", {})
             self.input_source = {
                 "type": "window",
@@ -199,9 +191,8 @@ class OCREngine:
                     "width": region.get("width", 400),
                     "height": region.get("height", 100),
                 },
-                "camera_index": 0,
             }
-        print(f"[OCR] Input source: type={self.input_source.get('type', 'window')}")
+        print(f"[OCR] Input source: hwnd={self.input_source.get('window_hwnd', 0)}")
 
         # Initialize PaddleOCR v3.x
         # - device: 'cpu' or 'gpu' (replaces old use_gpu)
@@ -314,49 +305,13 @@ class OCREngine:
 
         return img
 
-    def capture_camera_pil(self) -> Image.Image:
-        """Capture a single frame from the configured camera device."""
-        import cv2
-
-        index = self.input_source.get("camera_index", 0)
-        cap = cv2.VideoCapture(index, cv2.CAP_DSHOW)
-        ret, frame = cap.read()
-        cap.release()
-
-        if not ret:
-            raise ValueError(f"Failed to read from camera {index}.")
-
-        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-        img = Image.fromarray(frame_rgb)
-
-        # Crop to configured region 
-        r = self.input_source.get("window_region", {})
-        rw = r.get("width", 0)
-        rh = r.get("height", 0)
-        if rw > 0 and rh > 0:
-            box = (max(0, r.get("left", 0)), max(0, r.get("top", 0)),
-                   r.get("left", 0) + rw, r.get("top", 0) + rh)
-            
-            # Ensure within image bounds
-            max_w, max_h = img.size
-            if box[0] < max_w and box[1] < max_h:
-                img = img.crop((box[0], box[1], min(box[2], max_w), min(box[3], max_h)))
-                
-        return img
-
     def capture_and_recognise(self) -> tuple[Image.Image, list[dict]]:
-        """Capture from the configured input source and run OCR."""
-        src_type = self.input_source.get("type", "window")
-
-        if src_type == "camera":
-            pil_img = self.capture_camera_pil()
+        """Capture from the configured window source and run OCR."""
+        hwnd = self.input_source.get("window_hwnd", 0)
+        if hwnd:
+            pil_img = self.capture_window_pil()
         else:
-            # "window" — use PrintWindow if an HWND is set, else fall back to mss
-            hwnd = self.input_source.get("window_hwnd", 0)
-            if hwnd:
-                pil_img = self.capture_window_pil()
-            else:
-                pil_img = self.capture_region_pil()
+            pil_img = self.capture_region_pil()
 
         processed = self._preprocess_image(pil_img)
         frame = np.array(processed)

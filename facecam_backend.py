@@ -26,26 +26,29 @@ os.environ["PADDLEX_LOG_LEVEL"]  = "40"                 # PaddleX: ERROR only
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 os.environ["FLAGS_call_stack_level"] = "0"              # suppress call stack info
 
-# Ensure the working directory is correct when running as a bundled exe
-BASE_DIR = Path(sys.executable).parent if getattr(sys, 'frozen', False) else Path(__file__).parent
+# Prefer FACECAM_DATA_DIR (set by the Tauri frontend) so the backend finds
+# config.json and Players Name.txt in the user-writable AppData directory.
+# Fall back to the exe/script directory for dev mode.
+if os.environ.get("FACECAM_DATA_DIR"):
+    BASE_DIR = Path(os.environ["FACECAM_DATA_DIR"])
+elif getattr(sys, 'frozen', False):
+    BASE_DIR = Path(sys.executable).parent
+else:
+    BASE_DIR = Path(__file__).parent
 
 
 class _StderrSuppressor:
-    """Context manager that silences stderr AND stdout (where PaddleX dumps its logs).
-    Only our explicit print() calls should go to the real stdout, so we
-    temporarily swap both streams during the noisy init phase."""
+    """Context manager that silences stderr only (where PaddleX dumps its logs).
+    We must NOT redirect sys.stdout because Tauri reads from the real OS stdout pipe —
+    swapping it causes the pipe to break and the process to appear crashed."""
     def __init__(self):
         self._orig_stderr = None
-        self._orig_stdout = None
     def __enter__(self):
         self._orig_stderr = sys.stderr
-        self._orig_stdout = sys.stdout
         sys.stderr = io.StringIO()
-        sys.stdout = io.StringIO()
         return self
     def __exit__(self, *args):
         sys.stderr = self._orig_stderr
-        sys.stdout = self._orig_stdout
 
 
 def run_region_selector():
@@ -60,19 +63,39 @@ def run_region_selector():
 
 
 def run_list_windows():
-    """Print available windows as a JSON array."""
+    """Print available windows as a JSON array.
+    NOTE: Intentionally does NOT import ocr_engine to avoid triggering
+    PaddleOCR initialisation (which pollutes stdout with lines starting
+    with '[' and breaks the JSON parser in the Rust frontend).
+    """
     import json
-    from ocr_engine import list_windows
-    windows = list_windows()
-    print(json.dumps(windows))
+    try:
+        import win32gui
+        import win32con
+        windows = []
 
+        def _cb(hwnd, _):
+            if not win32gui.IsWindowVisible(hwnd):
+                return
+            if win32gui.GetParent(hwnd):
+                return
+            ex_style = win32gui.GetWindowLong(hwnd, win32con.GWL_EXSTYLE)
+            if ex_style & win32con.WS_EX_TOOLWINDOW:
+                return
+            title = win32gui.GetWindowText(hwnd)
+            if not title:
+                return
+            rect = win32gui.GetWindowRect(hwnd)
+            if (rect[2] - rect[0]) < 100 or (rect[3] - rect[1]) < 60:
+                return
+            windows.append({"hwnd": hwnd, "title": title})
 
-def run_list_cameras():
-    """Print available camera devices as a JSON array."""
-    import json
-    from ocr_engine import list_cameras
-    cameras = list_cameras()
-    print(json.dumps(cameras))
+        win32gui.EnumWindows(_cb, None)
+        windows.sort(key=lambda x: x["title"].lower())
+        print(json.dumps(windows))
+    except Exception as exc:
+        print(f"[ERROR] list_windows failed: {exc}", flush=True)
+        print("[]")
 
 
 def run_ocr_main():
@@ -83,17 +106,27 @@ def run_ocr_main():
 
     CONFIG_PATH = BASE_DIR / "config.json"
 
-    with open(CONFIG_PATH, "r", encoding="utf-8") as f:
-        config = json.load(f)
+    try:
+        with open(CONFIG_PATH, "r", encoding="utf-8") as f:
+            config = json.load(f)
+    except Exception as exc:
+        print(f"[ERROR] Failed to load config: {exc}", flush=True)
+        return
 
-    # Import OCR engine (suppress stderr + stdout during import + init to hide
+    # Import OCR engine (suppress stderr during import + init to hide
     # PaddleX "Creating model" / "Model files already exist" spam)
+    # NOTE: We only suppress stderr — stdout must remain connected to the
+    # real OS pipe so Tauri can read our log lines.
     print("[STATUS] Initializing OCR engine...", flush=True)
 
-    with _StderrSuppressor():
-        from ocr_engine import OCREngine
-        from server_sender import ServerSender
-        engine = OCREngine(config)
+    try:
+        with _StderrSuppressor():
+            from ocr_engine import OCREngine
+            from server_sender import ServerSender
+            engine = OCREngine(config)
+    except Exception as exc:
+        print(f"[ERROR] OCR engine failed to initialize: {exc}", flush=True)
+        return
 
     print("[SUCCESS] OCR engine ready!", flush=True)
 
@@ -102,28 +135,37 @@ def run_ocr_main():
     try:
         sender = ServerSender(config)
     except Exception as exc:
-        print(f"[WARNING] Server sender init failed: {exc}")
+        print(f"[WARNING] Server sender init failed: {exc}", flush=True)
 
     # Report loaded players
     players = engine.player_names
-    print(f"[STATUS] Loaded {len(players)} player name(s)")
+    print(f"[STATUS] Loaded {len(players)} player name(s)", flush=True)
 
     interval = config.get("capture", {}).get("interval_seconds", 2)
-    print(f"[STATUS] Capture interval: {interval}s")
-    print("[STATUS] OCR capture running... (Ctrl+C to stop)")
+    print(f"[STATUS] Capture interval: {interval}s", flush=True)
+    print("[STATUS] OCR capture running... (Ctrl+C to stop)", flush=True)
 
     last_sent_names = set()
+    consecutive_errors = 0
+    MAX_CONSECUTIVE_ERRORS = 10
 
     try:
         while True:
             try:
                 pil_img, detections = engine.capture_and_recognise()
+                consecutive_errors = 0  # reset on success
 
                 if pil_img:
+                    # Resize preview if it's too large (keep aspect ratio)
+                    preview_img = pil_img.copy()
+                    max_preview_dim = 640
+                    if preview_img.width > max_preview_dim or preview_img.height > max_preview_dim:
+                        preview_img.thumbnail((max_preview_dim, max_preview_dim))
+
                     buf = io.BytesIO()
-                    pil_img.save(buf, format="PNG")
+                    preview_img.save(buf, format="JPEG", quality=85)
                     img_b64 = base64.b64encode(buf.getvalue()).decode("utf-8")
-                    
+
                     json_dets = []
                     if detections:
                         for d in detections:
@@ -133,7 +175,7 @@ def run_ocr_main():
                                 "confidence": float(d.get("confidence", 0)),
                                 "match_score": int(d.get("match_score", 0)),
                             })
-                    
+
                     preview_data = {
                         "image": img_b64,
                         "detections": json_dets
@@ -145,12 +187,14 @@ def run_ocr_main():
                         if det["matched_name"]:
                             print(
                                 f'[SUCCESS] "{det["raw_text"]}" -> {det["matched_name"]} '
-                                f'(conf={det["confidence"]:.0%}, fuzz={det["match_score"]}%)'
+                                f'(conf={det["confidence"]:.0%}, fuzz={det["match_score"]}%)',
+                                flush=True
                             )
                         else:
                             print(
                                 f'[STATUS] "{det["raw_text"]}" -> no match '
-                                f'(conf={det["confidence"]:.0%}, fuzz={det["match_score"]}%)'
+                                f'(conf={det["confidence"]:.0%}, fuzz={det["match_score"]}%)',
+                                flush=True
                             )
 
                     # Send to server (non-blocking)
@@ -165,15 +209,19 @@ def run_ocr_main():
                                 daemon=True,
                             ).start()
                 else:
-                    print("[STATUS] No text detected in region")
+                    print("[STATUS] No text detected in region", flush=True)
 
             except Exception as exc:
-                print(f"[ERROR] Capture error: {exc}")
+                consecutive_errors += 1
+                print(f"[ERROR] Capture error: {exc}", flush=True)
+                if consecutive_errors >= MAX_CONSECUTIVE_ERRORS:
+                    print(f"[ERROR] {MAX_CONSECUTIVE_ERRORS} consecutive errors — stopping capture.", flush=True)
+                    break
 
             time.sleep(interval)
 
     except KeyboardInterrupt:
-        print("\n[STATUS] OCR capture stopped.")
+        print("\n[STATUS] OCR capture stopped.", flush=True)
 
 
 def _send_async(sender, matched):
@@ -193,7 +241,5 @@ if __name__ == "__main__":
         run_region_selector()
     elif "--list-windows" in sys.argv:
         run_list_windows()
-    elif "--list-cameras" in sys.argv:
-        run_list_cameras()
     else:
         run_ocr_main()

@@ -1,13 +1,13 @@
 {
   "input_source": {
-    "type": "window",
-    "window_hwnd": 66568,
-    "window_title": "Work | WorkZone - Discord",
+    "type": "camera",
+    "window_hwnd": 199328,
+    "window_title": "Ultimate Workzone | Messenger - Brave",
     "window_region": {
       "left": 0,
       "top": 0,
-      "width": 530,
-      "height": 193
+      "width": 2559,
+      "height": 1439
     },
     "camera_index": 2
   },

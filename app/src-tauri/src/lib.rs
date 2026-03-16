@@ -56,11 +56,6 @@ struct WindowInfo {
     title: String,
 }
 
-#[derive(Serialize, Deserialize, Clone)]
-struct CameraInfo {
-    index: u32,
-    name: String,
-}
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ServerConfig {
@@ -97,11 +92,67 @@ struct AppConfig {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-/// Get the FaceCam directory (where config.json and Players Name.txt live).
-/// In production, this is next to the exe. In dev, go to the FaceCam root.
+const APP_DATA_SUBDIR: &str = "EfinityFaceCam";
+
+/// Returns %APPDATA%\EfinityFaceCam — the writable user-data directory.
+fn get_app_data_dir() -> PathBuf {
+    if let Ok(appdata) = std::env::var("APPDATA") {
+        return PathBuf::from(appdata).join(APP_DATA_SUBDIR);
+    }
+    // Fallback: next to the exe
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
+}
+
+/// Create default config.json and Players Name.txt if they don't exist.
+fn ensure_default_config(dir: &PathBuf) {
+    let config_path = dir.join("config.json");
+    if !config_path.exists() {
+        let default_config = r#"{
+  "input_source": {
+    "type": "window",
+    "window_hwnd": 0,
+    "window_title": "",
+    "window_region": { "left": 0, "top": 0, "width": 530, "height": 193 },
+    "camera_index": 0
+  },
+  "server": {
+    "url": "http://localhost:3000/api/player",
+    "method": "POST",
+    "headers": {},
+    "timeout": 5,
+    "retry_count": 3,
+    "retry_delay": 1.0
+  },
+  "ocr": {
+    "language": "en",
+    "confidence_threshold": 0.6,
+    "fuzzy_match_threshold": 80,
+    "use_gpu": false
+  },
+  "capture": {
+    "interval_seconds": 2,
+    "save_debug_screenshots": false,
+    "debug_screenshot_dir": ""
+  }
+}"#;
+        let _ = fs::write(&config_path, default_config);
+    }
+
+    let players_path = dir.join("Players Name.txt");
+    if !players_path.exists() {
+        let _ = fs::write(&players_path, "# Add player names below, one per line\n");
+    }
+}
+
+/// Get the directory where config.json and Players Name.txt live.
+/// Search order: dev repo root → AppData (production / first run)
 fn get_facecam_dir() -> PathBuf {
     let mut search_dirs = Vec::new();
 
+    // Dev: exe is inside app/src-tauri/target/debug — walk up to FaceCam/
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             search_dirs.push(parent.to_path_buf());
@@ -109,18 +160,22 @@ fn get_facecam_dir() -> PathBuf {
     }
     if let Ok(cwd) = std::env::current_dir() {
         search_dirs.push(cwd.clone());
-        // Dev: the cwd might be app/src-tauri — go up to FaceCam
         search_dirs.push(cwd.join("..").join(".."));
     }
+    // Production: AppData
+    search_dirs.push(get_app_data_dir());
 
     for dir in &search_dirs {
-        if dir.join("config.json").exists() && dir.join("Players Name.txt").exists() {
+        if dir.join("config.json").exists() {
             return dir.to_path_buf();
         }
     }
 
-    // Fallback to cwd
-    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+    // No config found anywhere — bootstrap defaults in AppData
+    let data_dir = get_app_data_dir();
+    let _ = fs::create_dir_all(&data_dir);
+    ensure_default_config(&data_dir);
+    data_dir
 }
 
 fn get_config_path() -> PathBuf {
@@ -131,23 +186,20 @@ fn get_players_path() -> PathBuf {
     get_facecam_dir().join("Players Name.txt")
 }
 
-/// Determines the Python backend command.
+/// Returns (program, prefix_args) for the Python backend.
+/// Also sets FACECAM_DATA_DIR so the backend knows where to find config/players.
 fn get_backend_command() -> (String, Vec<String>) {
-    let facecam_dir = get_facecam_dir();
-
-    // Check for bundled exe
-    let exe_candidates = vec![
-        facecam_dir.join("FaceCam_Backend.exe"),
-        facecam_dir.join("scripts").join("FaceCam_Backend.exe"),
-    ];
-
-    for p in &exe_candidates {
-        if p.exists() {
-            return (p.to_string_lossy().to_string(), vec![]);
+    // Production: FaceCam_Backend.exe is placed next to the main exe by Tauri's externalBin.
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(parent) = exe_path.parent() {
+            let backend = parent.join("FaceCam_Backend.exe");
+            if backend.exists() {
+                return (backend.to_string_lossy().to_string(), vec![]);
+            }
         }
     }
 
-    // Fallback to Python
+    // Dev fallback: use Python + facecam_backend.py
     let python = if Command::new("python")
         .arg("--version")
         .creation_flags(0x08000000)
@@ -160,20 +212,46 @@ fn get_backend_command() -> (String, Vec<String>) {
         "python3".to_string()
     };
 
-    // Use facecam_backend.py (headless OCR — no GUI window)
-    // NOT main.py (that's the old tkinter GUI app)
-    let script_candidates = vec![
-        facecam_dir.join("facecam_backend.py"),
-        facecam_dir.join("scripts").join("facecam_backend.py"),
-    ];
+    // Search for facecam_backend.py independently of the data dir.
+    // In dev, the Tauri exe is at app/src-tauri/target/debug/ so we walk up,
+    // and cwd is typically app/ so cwd/.. = FaceCam/.
+    let mut script_dirs: Vec<PathBuf> = vec![];
+    if let Ok(exe_path) = std::env::current_exe() {
+        if let Some(p) = exe_path.parent() {
+            // debug/  ->  target/  ->  src-tauri/  ->  app/  ->  FaceCam/
+            script_dirs.push(p.join("..").join("..").join("..").join(".."));
+        }
+    }
+    if let Ok(cwd) = std::env::current_dir() {
+        script_dirs.push(cwd.join(".."));  // app/ -> FaceCam/
+        script_dirs.push(cwd.clone());
+    }
 
-    let script = script_candidates
+    let script = script_dirs
         .iter()
+        .map(|d| d.join("facecam_backend.py"))
         .find(|p| p.exists())
         .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| facecam_dir.join("facecam_backend.py").to_string_lossy().to_string());
+        .unwrap_or_else(|| "facecam_backend.py".to_string());
 
     (python, vec![script])
+}
+
+/// Returns the directory that contains facecam_backend.py (used as cwd when
+/// spawning Python so that sibling imports like `ocr_engine` resolve correctly).
+/// In production this is the same as the exe dir; in dev it's the FaceCam/ root.
+fn get_script_dir() -> PathBuf {
+    let (_, args) = get_backend_command();
+    if let Some(script) = args.first() {
+        if let Some(parent) = PathBuf::from(script).parent() {
+            return parent.to_path_buf();
+        }
+    }
+    // Production: exe dir (FaceCam_Backend.exe has no script arg)
+    std::env::current_exe()
+        .ok()
+        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
+        .unwrap_or_else(|| PathBuf::from("."))
 }
 
 // ── Config Commands ──────────────────────────────────────────────────
@@ -203,52 +281,41 @@ fn save_config(config: AppConfig) -> Result<CommandResult, String> {
 
 #[tauri::command]
 fn list_windows() -> Result<Vec<WindowInfo>, String> {
-    let facecam_dir = get_facecam_dir();
+    let data_dir = get_facecam_dir();
+    let script_dir = get_script_dir();
     let (program, mut args) = get_backend_command();
     args.push("--list-windows".to_string());
 
     let output = Command::new(&program)
         .args(&args)
-        .current_dir(&facecam_dir)
+        .current_dir(&script_dir)
+        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("PYTHONIOENCODING", "utf-8")
         .creation_flags(0x08000000)
         .output()
-        .map_err(|e| format!("Failed to run backend: {}", e))?;
+        .map_err(|e| format!("cmd={} {:?} — {}", program, args, e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    // Find the JSON line (last non-empty line)
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    // If the process failed entirely, surface the error
+    if !output.status.success() && stdout.trim().is_empty() {
+        return Err(format!("Backend exited {:?}\nstderr: {}", output.status.code(), stderr));
+    }
+
+    // Find the JSON array line (the last line that starts with '[')
     let json_line = stdout.lines()
         .filter(|l| l.trim_start().starts_with('['))
         .last()
         .unwrap_or("[]");
 
-    let windows: Vec<WindowInfo> = serde_json::from_str(json_line)
-        .map_err(|e| format!("Failed to parse window list: {}", e))?;
-    Ok(windows)
+    serde_json::from_str::<Vec<WindowInfo>>(json_line)
+        .map_err(|e| format!(
+            "JSON parse failed: {}\ncmd: {} {:?}\nstdout: {}\nstderr: {}",
+            e, program, args, stdout, stderr
+        ))
 }
 
-#[tauri::command]
-fn list_cameras() -> Result<Vec<CameraInfo>, String> {
-    let facecam_dir = get_facecam_dir();
-    let (program, mut args) = get_backend_command();
-    args.push("--list-cameras".to_string());
-
-    let output = Command::new(&program)
-        .args(&args)
-        .current_dir(&facecam_dir)
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("Failed to run backend: {}", e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let json_line = stdout.lines()
-        .filter(|l| l.trim_start().starts_with('['))
-        .last()
-        .unwrap_or("[]");
-
-    let cameras: Vec<CameraInfo> = serde_json::from_str(json_line)
-        .map_err(|e| format!("Failed to parse camera list: {}", e))?;
-    Ok(cameras)
-}
 
 // ── Player Name Commands ─────────────────────────────────────────────
 
@@ -342,7 +409,8 @@ fn remove_player(name: String) -> Result<CommandResult, String> {
 
 #[tauri::command]
 async fn open_window_region_selector(app: tauri::AppHandle, hwnd: i64) -> Result<CommandResult, String> {
-    let facecam_dir = get_facecam_dir();
+    let data_dir = get_facecam_dir();
+    let script_dir = get_script_dir();
     let (program, mut args) = get_backend_command();
     args.push("--region-select".to_string());
     if hwnd != 0 {
@@ -357,7 +425,9 @@ async fn open_window_region_selector(app: tauri::AppHandle, hwnd: i64) -> Result
 
     let output = Command::new(&program)
         .args(&args)
-        .current_dir(&facecam_dir)
+        .current_dir(&script_dir)
+        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("PYTHONIOENCODING", "utf-8")
         .creation_flags(0x00000000)  // Allow window for region selector
         .output();
 
@@ -385,7 +455,8 @@ async fn start_ocr(
     app: tauri::AppHandle,
     state: State<'_, AppState>,
 ) -> Result<CommandResult, String> {
-    let facecam_dir = get_facecam_dir();
+    let data_dir = get_facecam_dir();
+    let script_dir = get_script_dir();
     let (program, prefix_args) = get_backend_command();
 
     let _ = app.emit("log", LogEvent {
@@ -393,12 +464,11 @@ async fn start_ocr(
         message: "Starting OCR capture...".into(),
     });
 
-    // facecam_backend.py runs OCR headlessly — no GUI window.
-    // All output goes to stdout which we stream to our Live Log.
-
     let child = Command::new(&program)
         .args(&prefix_args)
-        .current_dir(&facecam_dir)
+        .current_dir(&script_dir)
+        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("PYTHONIOENCODING", "utf-8")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .creation_flags(0x08000000)
@@ -571,7 +641,6 @@ pub fn run() {
             load_config,
             save_config,
             list_windows,
-            list_cameras,
             open_window_region_selector,
             load_players,
             save_players,

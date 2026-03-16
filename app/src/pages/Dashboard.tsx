@@ -3,8 +3,8 @@ import { invoke } from "@tauri-apps/api/core";
 import LogViewer from "../components/LogViewer";
 import { useSelector, useDispatch } from "react-redux";
 import { type RootState } from "../store/store";
-import { 
-  setConfig, updateConfigField, setIsRunning, setWindowList, setCameraList, setBackendStatus, addLog, clearLogs 
+import {
+  setConfig, updateConfigField, setIsRunning, setWindowList, setBackendStatus, addLog, clearLogs
 } from "../store/appSlice";
 import {
   Activity,
@@ -15,10 +15,8 @@ import {
   Camera,
   ScanSearch,
   Monitor,
-  Video,
   RefreshCw,
   Target,
-  Info,
 } from "lucide-react";
 
 interface WindowInfo {
@@ -26,10 +24,6 @@ interface WindowInfo {
   title: string;
 }
 
-interface CameraInfo {
-  index: number;
-  name: string;
-}
 
 export default function Dashboard() {
   const dispatch = useDispatch();
@@ -40,13 +34,11 @@ export default function Dashboard() {
     stats,
     previewData,
     windowList,
-    cameraList,
     backendOk,
     backendStatus
   } = useSelector((state: RootState) => state.app);
 
   const [isRefreshingWindows, setIsRefreshingWindows] = useState(false);
-  const [isRefreshingCameras, setIsRefreshingCameras] = useState(false);
   const [isSelectingRegion, setIsSelectingRegion] = useState(false);
 
   useEffect(() => {
@@ -55,9 +47,7 @@ export default function Dashboard() {
     }
     checkBackend();
     
-    // Auto-refresh lists if empty
     if (windowList.length === 0) handleRefreshWindows();
-    if (cameraList.length === 0) handleRefreshCameras();
   }, []);
 
   const loadConfig = async () => {
@@ -108,18 +98,6 @@ export default function Dashboard() {
     }
   };
 
-  const handleRefreshCameras = async () => {
-    setIsRefreshingCameras(true);
-    try {
-      const cameras = await invoke<CameraInfo[]>("list_cameras");
-      dispatch(setCameraList(cameras));
-    } catch (e) {
-      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to list cameras: ${e}` }));
-    } finally {
-      setIsRefreshingCameras(false);
-    }
-  };
-
   const handleSelectWindowRegion = async () => {
     setIsSelectingRegion(true);
     try {
@@ -128,18 +106,6 @@ export default function Dashboard() {
       await loadConfig();
     } catch (e) {
       dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Region Selector Error: ${e}` }));
-    } finally {
-      setIsSelectingRegion(false);
-    }
-  };
-
-  const handleSelectCameraRegion = async () => {
-    setIsSelectingRegion(true);
-    try {
-      await invoke("open_region_selector");
-      await loadConfig();
-    } catch (e) {
-      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Selector Error: ${e}` }));
     } finally {
       setIsSelectingRegion(false);
     }
@@ -177,33 +143,7 @@ export default function Dashboard() {
     }
   };
 
-  const handleSelectCamera = async (index: number) => {
-    // Optimistic update
-    dispatch(updateConfigField({ path: "input_source.type", value: "camera" }));
-    dispatch(updateConfigField({ path: "input_source.camera_index", value: index }));
-
-    try {
-      const cfg = await invoke<any>("load_config");
-      cfg.input_source = { ...cfg.input_source, type: "camera", camera_index: index };
-      await invoke("save_config", { config: cfg });
-    } catch (e) {
-      dispatch(addLog({ time: new Date().toLocaleTimeString("en-US", { hour12: false }), level: "error", message: `Failed to save camera: ${e}` }));
-    }
-  };
-
-  const handleSwitchMode = async (mode: "window" | "camera") => {
-    // Optimistic update
-    dispatch(updateConfigField({ path: "input_source.type", value: mode }));
-
-    try {
-      const cfg = await invoke<any>("load_config");
-      cfg.input_source = { ...cfg.input_source, type: mode };
-      await invoke("save_config", { config: cfg });
-    } catch {}
-  };
-
   const src = config?.input_source;
-  const srcType = src?.type ?? "window";
 
   return (
     <div style={{ display: "flex", height: "100%", padding: "16px", gap: "16px" }} className="animate-fade-in">
@@ -231,166 +171,73 @@ export default function Dashboard() {
             <Monitor size={14} className="icon" /> Input Source
           </div>
 
-          {/* Mode tabs */}
-          <div style={{ display: "flex", gap: 6, padding: 4, background: "rgba(255,255,255,0.04)", borderRadius: 10, border: "1px solid var(--border)", marginBottom: 14 }}>
-            {(["window", "camera"] as const).map((mode) => (
-              <button
-                key={mode}
-                onClick={() => handleSwitchMode(mode)}
-                style={{
-                  flex: 1, padding: "7px 0", borderRadius: 7, border: "none", cursor: "pointer",
-                  background: srcType === mode ? "var(--accent)" : "transparent",
-                  color: srcType === mode ? "white" : "var(--text-muted)",
-                  fontWeight: 600, fontSize: 12,
-                  display: "flex", alignItems: "center", justifyContent: "center", gap: 5,
-                  transition: "all 0.2s ease",
+          <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+            <div style={{ display: "flex", gap: 8 }}>
+              <select
+                className="input"
+                style={{ flex: 1, fontSize: 12 }}
+                value={src?.window_hwnd ?? 0}
+                onChange={(e) => {
+                  const hwnd = parseInt(e.target.value) || 0;
+                  const win = windowList.find((w) => w.hwnd === hwnd);
+                  if (win) handleSelectWindow(win.hwnd, win.title);
                 }}
               >
-                {mode === "window" ? <Monitor size={13} /> : <Video size={13} />}
-                {mode === "window" ? "Window" : "Virtual Camera"}
+                <option value={0}>— Select a window —</option>
+                {windowList.map((w) => (
+                  <option key={w.hwnd} value={w.hwnd}>{w.title}</option>
+                ))}
+              </select>
+              <button
+                className="btn btn-accent"
+                style={{ height: 36, padding: "0 10px", borderRadius: 8, flexShrink: 0 }}
+                onClick={handleRefreshWindows}
+                disabled={isRefreshingWindows}
+                title="Refresh window list"
+              >
+                <RefreshCw size={13} className={isRefreshingWindows ? "animate-spin" : ""} />
               </button>
-            ))}
-          </div>
+            </div>
+            {src?.window_title ? (
+              <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -2 }}>{src.window_title}</p>
+            ) : (
+              <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -2 }}>Click refresh then select a window</p>
+            )}
 
-          {/* Window mode */}
-          {srcType === "window" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", gap: 8 }}>
-                <select
-                  className="input"
-                  style={{ flex: 1, fontSize: 12 }}
-                  value={src?.window_hwnd ?? 0}
-                  onChange={(e) => {
-                    const hwnd = parseInt(e.target.value) || 0;
-                    const win = windowList.find((w) => w.hwnd === hwnd);
-                    if (win) handleSelectWindow(win.hwnd, win.title);
-                  }}
-                >
-                  <option value={0}>— Select a window —</option>
-                  {windowList.map((w) => (
-                    <option key={w.hwnd} value={w.hwnd}>{w.title}</option>
-                  ))}
-                </select>
-                <button
-                  className="btn btn-accent"
-                  style={{ height: 36, padding: "0 10px", borderRadius: 8, flexShrink: 0 }}
-                  onClick={handleRefreshWindows}
-                  disabled={isRefreshingWindows}
-                  title="Refresh window list"
-                >
-                  <RefreshCw size={13} className={isRefreshingWindows ? "animate-spin" : ""} />
-                </button>
+            {/* Capture Region */}
+            <div style={{ marginTop: 6 }}>
+              <label style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>
+                Capture Region
+              </label>
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
+                {(["left", "top", "width", "height"] as const).map((field) => (
+                  <div className="input-group" key={field} style={{ marginBottom: 0 }}>
+                    <label style={{ fontSize: 10, textTransform: "capitalize" }}>{field === "left" ? "X Offset" : field === "top" ? "Y Offset" : field}</label>
+                    <input
+                      className="input"
+                      type="number"
+                      style={{ fontSize: 12, padding: "6px 10px" }}
+                      value={src?.window_region?.[field] ?? 0}
+                      onChange={(e) => updateConfigValue(`input_source.window_region.${field}`, parseInt(e.target.value) || 0)}
+                    />
+                  </div>
+                ))}
               </div>
-              {src?.window_title ? (
-                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -2 }}>
-                  {src.window_title}
-                </p>
+            </div>
+
+            <button
+              className="btn btn-accent"
+              style={{ width: "100%", height: 34, borderRadius: 8, fontSize: 12, marginTop: 4 }}
+              onClick={handleSelectWindowRegion}
+              disabled={isSelectingRegion || !(src?.window_hwnd)}
+            >
+              {isSelectingRegion ? (
+                <RefreshCw size={13} className="animate-spin" />
               ) : (
-                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: -2 }}>
-                  Click refresh then select a window
-                </p>
+                <><Target size={13} /> Select Region in Window</>
               )}
-
-              {/* Region Inputs */}
-              <div style={{ marginTop: 6 }}>
-                <label style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>
-                  Capture Region
-                </label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  {(["left", "top", "width", "height"] as const).map((field) => (
-                    <div className="input-group" key={field} style={{ marginBottom: 0 }}>
-                      <label style={{ fontSize: 10, textTransform: "capitalize" }}>{field === "left" ? "X Offset" : field === "top" ? "Y Offset" : field}</label>
-                      <input
-                        className="input"
-                        type="number"
-                        style={{ fontSize: 12, padding: "6px 10px" }}
-                        value={src?.window_region?.[field] ?? 0}
-                        onChange={(e) => updateConfigValue(`input_source.window_region.${field}`, parseInt(e.target.value) || 0)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <button
-                className="btn btn-accent"
-                style={{ width: "100%", height: 34, borderRadius: 8, fontSize: 12, marginTop: 4 }}
-                onClick={handleSelectWindowRegion}
-                disabled={isSelectingRegion || !(src?.window_hwnd)}
-              >
-                {isSelectingRegion ? (
-                  <RefreshCw size={13} className="animate-spin" />
-                ) : (
-                  <><Target size={13} /> Select Region in Window</>
-                )}
-              </button>
-            </div>
-          )}
-
-          {/* Camera mode */}
-          {srcType === "camera" && (
-            <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-              <div style={{ display: "flex", gap: 8 }}>
-                <select
-                  className="input"
-                  style={{ flex: 1, fontSize: 12 }}
-                  value={src?.camera_index ?? 0}
-                  onChange={(e) => handleSelectCamera(parseInt(e.target.value) || 0)}
-                >
-                  {cameraList.length === 0 ? (
-                    <option value={0}>Camera 0 (default)</option>
-                  ) : (
-                    cameraList.map((c) => (
-                      <option key={c.index} value={c.index}>{c.name}</option>
-                    ))
-                  )}
-                </select>
-                <button
-                  className="btn btn-accent"
-                  style={{ height: 36, padding: "0 10px", borderRadius: 8, flexShrink: 0 }}
-                  onClick={handleRefreshCameras}
-                  disabled={isRefreshingCameras}
-                  title="Detect cameras"
-                >
-                  <RefreshCw size={13} className={isRefreshingCameras ? "animate-spin" : ""} />
-                </button>
-              </div>
-
-              {/* Region Inputs */}
-              <div style={{ marginTop: 6 }}>
-                <label style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 6 }}>
-                  Capture Region
-                </label>
-                <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 8 }}>
-                  {(["left", "top", "width", "height"] as const).map((field) => (
-                    <div className="input-group" key={field} style={{ marginBottom: 0 }}>
-                      <label style={{ fontSize: 10, textTransform: "capitalize" }}>{field === "left" ? "X Offset" : field === "top" ? "Y Offset" : field}</label>
-                      <input
-                        className="input"
-                        type="number"
-                        style={{ fontSize: 12, padding: "6px 10px" }}
-                        value={src?.window_region?.[field] ?? 0}
-                        onChange={(e) => updateConfigValue(`input_source.window_region.${field}`, parseInt(e.target.value) || 0)}
-                      />
-                    </div>
-                  ))}
-                </div>
-              </div>
-
-              <button
-                className="btn btn-accent"
-                style={{ width: "100%", height: 34, borderRadius: 8, fontSize: 12, marginTop: 4 }}
-                onClick={handleSelectCameraRegion}
-                disabled={isSelectingRegion}
-              >
-                {isSelectingRegion ? (
-                  <RefreshCw size={13} className="animate-spin" />
-                ) : (
-                  <><Target size={13} /> Select Global Region</>
-                )}
-              </button>
-            </div>
-          )}
+            </button>
+          </div>
         </div>
 
         {/* Controls Card */}
@@ -450,7 +297,7 @@ export default function Dashboard() {
             </div>
             <div style={{ flex: 1, display: "flex", alignItems: "center", justifyContent: "center", padding: 12, background: "rgba(0,0,0,0.15)" }}>
               {previewData?.image ? (
-                <img src={`data:image/png;base64,${previewData.image}`} alt="Capture"
+                <img src={`data:image/jpeg;base64,${previewData.image}`} alt="Capture"
                   style={{ maxWidth: "100%", maxHeight: "100%", objectFit: "contain", border: "2px solid rgba(255,255,255,0.05)", borderRadius: 4 }} />
               ) : (
                 <div style={{ color: "var(--text-muted)", fontSize: 12 }}>Waiting for capture...</div>
