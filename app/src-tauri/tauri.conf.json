@@ -1,13 +1,14 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Efinity FaceCam",
+  "productName": "FaceCam",
   "version": "0.1.0",
   "identifier": "com.themis.facecam",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "npm run build:all"
+    "beforeBuildCommand": "node clean_builds.js && npm run build:all",
+    "beforeBundleCommand": "node post_build.js"
   },
   "app": {
     "windows": [
@@ -36,9 +37,6 @@
       "icons/128x128@2x.png",
       "icons/icon.icns",
       "icons/icon.ico"
-    ],
-    "externalBin": [
-      "binaries/FaceCam_Backend"
     ],
     "windows": {
       "nsis": {

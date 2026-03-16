@@ -50,12 +50,13 @@ try {
   process.exit(1);
 }
 
-// ── 4. Copy result into Tauri binaries/ ──────────────────────────────────
+// ── 4. Copy to Root and Verify ──────────────────────────────────────────────
 if (!fs.existsSync(backendSrc)) {
   console.error(`[build-backend] Expected output not found: ${backendSrc}`);
   process.exit(1);
 }
 
-fs.mkdirSync(binariesDir, { recursive: true });
-fs.copyFileSync(backendSrc, backendDst);
-console.log(`\n[build-backend] Backend ready: ${backendDst}\n`);
+const rootBackendPath = path.join(facecamDir, 'FaceCam_Backend.exe');
+fs.copyFileSync(backendSrc, rootBackendPath);
+
+console.log(`\n[build-backend] Backend built successfully at: ${rootBackendPath}\n`);

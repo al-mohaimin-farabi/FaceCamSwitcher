@@ -26,6 +26,49 @@ os.environ["PADDLEX_LOG_LEVEL"]  = "40"                 # PaddleX: ERROR only
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 os.environ["FLAGS_call_stack_level"] = "0"              # suppress call stack info
 
+# ── PyInstaller frozen-env: fix importlib.metadata ────────────────────
+# paddlex.utils.deps calls importlib.metadata.metadata("paddlex") and
+# importlib.metadata.requires("paddlex") at import time to build its
+# dependency map.  Inside a PyInstaller bundle these calls fail because
+# .dist-info directories are not bundled (or are incomplete).
+# We patch importlib.metadata BEFORE any paddle imports happen.
+if getattr(sys, "frozen", False):
+    import importlib.metadata as _im
+
+    _orig_requires = _im.requires
+    _orig_metadata = _im.metadata
+    _orig_version  = _im.version
+
+    def _patched_requires(pkg):
+        try:
+            result = _orig_requires(pkg)
+            if result is not None:
+                return result
+        except _im.PackageNotFoundError:
+            pass
+        return []            # treat missing metadata as "no requirements"
+
+    def _patched_metadata(pkg):
+        try:
+            return _orig_metadata(pkg)
+        except _im.PackageNotFoundError:
+            # Return a minimal email.message.Message so callers don't crash
+            import email.message
+            m = email.message.Message()
+            m["Name"] = pkg
+            m["Version"] = "0.0.0"
+            return m
+
+    def _patched_version(pkg):
+        try:
+            return _orig_version(pkg)
+        except _im.PackageNotFoundError:
+            return "0.0.0"   # dummy version so is_dep_available() says True
+
+    _im.requires = _patched_requires
+    _im.metadata = _patched_metadata
+    _im.version  = _patched_version
+
 # Prefer FACECAM_DATA_DIR (set by the Tauri frontend) so the backend finds
 # config.json and Players Name.txt in the user-writable AppData directory.
 # Fall back to the exe/script directory for dev mode.

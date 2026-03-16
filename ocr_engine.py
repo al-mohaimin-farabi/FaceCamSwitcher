@@ -42,7 +42,6 @@ from typing import Optional
 import mss
 import numpy as np
 from PIL import Image, ImageEnhance, ImageFilter
-from paddleocr import PaddleOCR
 from thefuzz import fuzz, process
 
 # ──────────────────────────────────────────────────────────────────────
@@ -214,18 +213,76 @@ class OCREngine:
         print(f"[OCR] Input source: hwnd={self.input_source.get('window_hwnd', 0)}")
 
         # Initialize PaddleOCR v3.x
-        # - device: 'cpu' or 'gpu' (replaces old use_gpu)
-        # - enable_mkldnn: disabled to avoid compatibility issues
-        # - use_textline_orientation: replaces old use_angle_cls
         print("[OCR] Initializing PaddleOCR ...")
         device = "gpu" if self.use_gpu else "cpu"
-        # Suppress internal PaddleOCR logs
         logging.getLogger('ppocr').setLevel(logging.ERROR)
-        
-        self.ocr = PaddleOCR(
-            lang=self.lang,
-            device=device,
-        )
+
+        # ── PyInstaller frozen-env fix ────────────────────────────────
+        # Inside a PyInstaller bundle, importlib.metadata cannot find
+        # package metadata (.dist-info), so paddlex's dependency checker
+        # (is_dep_available) reports every dependency as missing and
+        # raises DependencyError.  Since PyInstaller already bundles all
+        # required code, we monkey-patch the checker to always pass.
+        if getattr(sys, "frozen", False):
+            try:
+                import paddlex.utils.deps as _pdx_deps
+                _pdx_deps.is_dep_available = lambda dep, /, check_version=False: True
+                _pdx_deps.is_dep_available.__wrapped__ = True  # tag so we can tell
+                _pdx_deps.is_extra_available = lambda extra: True
+                # Clear cached results that may already be False
+                if hasattr(_pdx_deps.is_dep_available, "cache_clear"):
+                    _pdx_deps.is_dep_available.cache_clear()
+                if hasattr(_pdx_deps.is_extra_available, "cache_clear"):
+                    _pdx_deps.is_extra_available.cache_clear()
+                print("[OCR] Patched paddlex dependency checker for frozen env")
+            except Exception as patch_err:
+                print(f"[OCR] Warning: could not patch dep checker: {patch_err}")
+
+        try:
+            from paddleocr import PaddleOCR as _PaddleOCR
+            self.ocr = _PaddleOCR(lang=self.lang, device=device)
+            self._ocr_backend = "paddleocr"
+        except Exception as first_err:
+            print(f"[OCR] PaddleOCR wrapper failed: {first_err}")
+            # paddlex registry lookup failed — find the OCR.yaml config and pass the
+            # full file path so paddlex skips the broken registry and loads directly.
+            try:
+                import paddlex as _px
+                from paddlex import create_pipeline as _create_pipeline
+
+                import glob as _glob
+                _px_dir = Path(_px.__file__).parent
+                # Search common locations for the pipeline config
+                _candidates = [
+                    _px_dir / "configs" / "pipelines" / "OCR.yaml",
+                    _px_dir / "pipelines" / "OCR.yaml",
+                    _px_dir / "pipelines" / "ocr" / "OCR.yaml",
+                    _px_dir / "repo_apis" / "paddleocr_api" / "pipelines" / "OCR.yaml",
+                ]
+                _cfg = next((p for p in _candidates if p.exists()), None)
+
+                # Full recursive search as last resort
+                if not _cfg:
+                    _found = _glob.glob(str(_px_dir / "**" / "OCR.yaml"), recursive=True)
+                    if _found:
+                        _cfg = Path(_found[0])
+
+                if _cfg:
+                    print(f"[OCR] Using config: {_cfg}")
+                    self.ocr = _create_pipeline(pipeline=str(_cfg), device=device)
+                else:
+                    print(f"[OCR] OCR.yaml not found in {_px_dir}, trying pipeline name...")
+                    self.ocr = _create_pipeline(pipeline="OCR", device=device)
+
+                self._ocr_backend = "paddlex"
+            except Exception as second_err:
+                raise RuntimeError(
+                    f"PaddleOCR failed to initialize.\n"
+                    f"  paddleocr wrapper error: {first_err}\n"
+                    f"  paddlex direct error:    {second_err}\n"
+                    f"Run: pip uninstall paddleocr paddlex -y && pip install paddleocr==3.4.0"
+                ) from second_err
+
         print("[OCR] PaddleOCR ready [OK]")
 
     # ─── Screen Capture ──────────────────────────────────────────────
