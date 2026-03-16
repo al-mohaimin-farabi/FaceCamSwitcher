@@ -1,6 +1,6 @@
 {
   "input_source": {
-    "type": "camera",
+    "type": "window",
     "window_hwnd": 199328,
     "window_title": "Ultimate Workzone | Messenger - Brave",
     "window_region": {
@@ -12,7 +12,9 @@
     "camera_index": 2
   },
   "server": {
+    "enabled": false,
     "url": "http://localhost:3000/api/facecam",
+    "players_api_url": "",
     "method": "POST",
     "headers": {
       "Authorization": "Bearer YOUR_API_KEY_HERE",

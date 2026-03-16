@@ -5,7 +5,7 @@ import Settings from "./pages/Settings";
 import { LayoutDashboard, Users, Settings as SettingsIcon } from "lucide-react";
 import { useDispatch } from "react-redux";
 import { listen } from "@tauri-apps/api/event";
-import { addLog, incrementScans, incrementMatches, setPreviewData, setIsRunning } from "./store/appSlice";
+import { addLog, incrementScans, incrementDetections, incrementMatches, setPreviewData, setIsRunning, type PreviewData } from "./store/appSlice";
 
 type Page = "dashboard" | "players" | "settings";
 
@@ -17,21 +17,22 @@ function App() {
     // Global Tauri event listeners mapped to Redux
     const unlistenLog = listen<{ level: string; message: string }>("log", (event) => {
       if (event.payload.level === "preview") {
-        try { 
-          const data = JSON.parse(event.payload.message);
+        try {
+          const data: PreviewData = JSON.parse(event.payload.message);
           dispatch(setPreviewData(data));
+          // Update stats from actual detection data
+          dispatch(incrementScans());
+          if (data.detections && data.detections.length > 0) {
+            dispatch(incrementDetections(data.detections.length));
+            if (data.detections.some((d) => d.matched_name)) {
+              dispatch(incrementMatches());
+            }
+          }
         } catch {}
         return;
       }
       const time = new Date().toLocaleTimeString("en-US", { hour12: false });
       dispatch(addLog({ time, level: event.payload.level, message: event.payload.message }));
-
-      if (event.payload.message.includes("detected") || event.payload.message.includes("OCR")) {
-        dispatch(incrementScans());
-      }
-      if (event.payload.message.includes("→") && event.payload.message.includes("match")) {
-        dispatch(incrementMatches());
-      }
     });
 
     const unlistenStop = listen("ocr_stopped", () => {

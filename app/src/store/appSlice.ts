@@ -11,6 +11,11 @@ export interface WindowInfo {
   title: string;
 }
 
+export interface CameraInfo {
+  index: number;
+  name: string;
+}
+
 
 export interface AppConfig {
   input_source: {
@@ -26,7 +31,9 @@ export interface AppConfig {
     camera_index: number;
   };
   server: {
+    enabled: boolean;
     url: string;
+    players_api_url: string;
     method: string;
     headers: Record<string, string>;
     timeout: number;
@@ -67,6 +74,7 @@ interface AppState {
   };
   previewData: PreviewData | null;
   windowList: WindowInfo[];
+  cameraList: CameraInfo[];
   backendOk: boolean;
   backendStatus: string;
 }
@@ -78,6 +86,7 @@ const initialState: AppState = {
   stats: { scans: 0, detections: 0, matches: 0 },
   previewData: null,
   windowList: [],
+  cameraList: [],
   backendOk: false,
   backendStatus: "Checking...",
 };
@@ -101,11 +110,10 @@ export const appSlice = createSlice({
     setIsRunning: (state, action: PayloadAction<boolean>) => {
       state.isRunning = action.payload;
       if (action.payload) {
+        // Reset stats on start, but keep last preview until first new frame arrives
         state.stats = { scans: 0, detections: 0, matches: 0 };
-        state.previewData = null;
-      } else {
-        state.previewData = null;
       }
+      // Do NOT clear previewData on stop — keep last captured frame visible
     },
     addLog: (state, action: PayloadAction<LogEntry>) => {
       state.logs.push(action.payload);
@@ -119,6 +127,9 @@ export const appSlice = createSlice({
     incrementScans: (state) => {
       state.stats.scans += 1;
     },
+    incrementDetections: (state, action: PayloadAction<number>) => {
+      state.stats.detections += action.payload;
+    },
     incrementMatches: (state) => {
       state.stats.matches += 1;
     },
@@ -127,6 +138,9 @@ export const appSlice = createSlice({
     },
     setWindowList: (state, action: PayloadAction<WindowInfo[]>) => {
       state.windowList = action.payload;
+    },
+    setCameraList: (state, action: PayloadAction<CameraInfo[]>) => {
+      state.cameraList = action.payload;
     },
     setBackendStatus: (state, action: PayloadAction<{ ok: boolean; message: string }>) => {
       state.backendOk = action.payload.ok;
@@ -142,9 +156,11 @@ export const {
   addLog,
   clearLogs,
   incrementScans,
+  incrementDetections,
   incrementMatches,
   setPreviewData,
   setWindowList,
+  setCameraList,
   setBackendStatus,
 } = appSlice.actions;
 

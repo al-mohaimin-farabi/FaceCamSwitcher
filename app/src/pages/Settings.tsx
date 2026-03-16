@@ -219,20 +219,47 @@ export default function Settings() {
           <div className="section-header" style={{ marginBottom: 0 }}>
             <Globe size={16} className="icon" /> Network Sync
           </div>
-          
+
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            <div className="input-group">
-              <label>API Endpoint</label>
+            {/* Enable/disable toggle — most prominent control */}
+            <div style={{ padding: "12px 14px", borderRadius: 12, background: config.server.enabled ? "rgba(34,197,94,0.06)" : "rgba(255,255,255,0.03)", border: `1px solid ${config.server.enabled ? "rgba(34,197,94,0.25)" : "var(--border)"}`, display: "flex", alignItems: "center", justifyContent: "space-between", transition: "all 0.3s" }}>
+              <div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: config.server.enabled ? "var(--green)" : "var(--text-secondary)" }}>
+                  Send Detections to Server
+                </span>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                  {config.server.enabled ? "OCR results are being sent to your API" : "Disabled — OCR runs locally only (faster)"}
+                </p>
+              </div>
+              <div
+                onClick={() => updateConfig("server.enabled", !config.server.enabled)}
+                style={{
+                  width: 36, height: 20, borderRadius: 10, flexShrink: 0,
+                  background: config.server.enabled ? "var(--green)" : "rgba(255,255,255,0.1)",
+                  position: "relative", cursor: "pointer", transition: "all 0.3s ease"
+                }}
+              >
+                <div style={{
+                  width: 14, height: 14, borderRadius: "50%", background: "white",
+                  position: "absolute", top: 3,
+                  left: config.server.enabled ? 19 : 3,
+                  transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)"
+                }} />
+              </div>
+            </div>
+
+            <div className="input-group" style={{ opacity: config.server.enabled ? 1 : 0.45, pointerEvents: config.server.enabled ? "auto" : "none", transition: "opacity 0.3s" }}>
+              <label>OCR Results Endpoint</label>
               <input
                 className="input"
                 type="text"
                 value={config.server.url}
                 onChange={(e) => updateConfig("server.url", e.target.value)}
-                placeholder="https://api.example.com/data"
+                placeholder="https://api.example.com/api/facecam"
               />
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, opacity: config.server.enabled ? 1 : 0.45, pointerEvents: config.server.enabled ? "auto" : "none", transition: "opacity 0.3s" }}>
               <div className="input-group">
                 <label>HTTP Method</label>
                 <select
@@ -256,7 +283,7 @@ export default function Settings() {
               </div>
             </div>
 
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16 }}>
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, opacity: config.server.enabled ? 1 : 0.45, pointerEvents: config.server.enabled ? "auto" : "none", transition: "opacity 0.3s" }}>
               <div className="input-group">
                 <label>Max Retries</label>
                 <input

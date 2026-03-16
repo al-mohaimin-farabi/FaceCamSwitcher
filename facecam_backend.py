@@ -98,6 +98,60 @@ def run_list_windows():
         print("[]")
 
 
+def run_list_cameras():
+    """Print available camera devices (including virtual cameras) as a JSON array.
+    Uses pygrabber for friendly names (OBS Virtual Camera, vMix, etc.) with
+    OpenCV as a fallback to verify devices are actually readable.
+    NOTE: Intentionally avoids importing ocr_engine to prevent PaddleOCR init noise.
+    """
+    import json
+
+    # Step 1: Try to get friendly device names via pygrabber (Windows DirectShow)
+    device_names: dict[int, str] = {}
+    try:
+        from pygrabber.dshow_graph import FilterGraph
+        graph = FilterGraph()
+        devices = graph.get_input_devices()
+        for i, name in enumerate(devices):
+            device_names[i] = name
+    except Exception:
+        pass
+
+    # Step 2: Use OpenCV to confirm which indices are actually readable
+    try:
+        import cv2
+        cameras = []
+        max_index = max(len(device_names) + 2, 10)
+        for i in range(max_index):
+            cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+            if cap.isOpened():
+                name = device_names.get(i, f"Camera {i}")
+                cameras.append({"index": i, "name": name})
+                cap.release()
+            else:
+                cap.release()
+        print(json.dumps(cameras))
+    except Exception as exc:
+        # If OpenCV fails entirely, fall back to pygrabber names only
+        if device_names:
+            cameras = [{"index": i, "name": n} for i, n in device_names.items()]
+            print(json.dumps(cameras))
+        else:
+            print(f"[ERROR] list_cameras failed: {exc}", flush=True)
+            print("[]")
+
+
+def run_camera_region_select(camera_index: int):
+    """Open an interactive region selector fed by a live camera preview."""
+    from camera_region_selector import CameraRegionSelector
+    selector = CameraRegionSelector(camera_index=camera_index)
+    region = selector.run()
+    if region:
+        print("[SUCCESS] Camera region saved successfully!")
+    else:
+        print("[WARNING] No camera region was selected.")
+
+
 def run_ocr_main():
     """Run the main OCR capture loop (headless -- no GUI window)."""
     import json
@@ -130,12 +184,16 @@ def run_ocr_main():
 
     print("[SUCCESS] OCR engine ready!", flush=True)
 
-    # Initialize server sender
+    # Initialize server sender only if enabled in config
     sender = None
-    try:
-        sender = ServerSender(config)
-    except Exception as exc:
-        print(f"[WARNING] Server sender init failed: {exc}", flush=True)
+    server_enabled = config.get("server", {}).get("enabled", False)
+    if server_enabled:
+        try:
+            sender = ServerSender(config)
+        except Exception as exc:
+            print(f"[WARNING] Server sender init failed: {exc}", flush=True)
+    else:
+        print("[STATUS] Server sending disabled — running in local-only mode", flush=True)
 
     # Report loaded players
     players = engine.player_names
@@ -239,7 +297,18 @@ def _send_async(sender, matched):
 if __name__ == "__main__":
     if "--region-select" in sys.argv:
         run_region_selector()
+    elif "--camera-region-select" in sys.argv:
+        # Find --camera-index N argument, default 0
+        cam_idx = 0
+        if "--camera-index" in sys.argv:
+            try:
+                cam_idx = int(sys.argv[sys.argv.index("--camera-index") + 1])
+            except (ValueError, IndexError):
+                cam_idx = 0
+        run_camera_region_select(cam_idx)
     elif "--list-windows" in sys.argv:
         run_list_windows()
+    elif "--list-cameras" in sys.argv:
+        run_list_cameras()
     else:
         run_ocr_main()

@@ -56,10 +56,20 @@ struct WindowInfo {
     title: String,
 }
 
+#[derive(Serialize, Deserialize, Clone)]
+struct CameraInfo {
+    index: u32,
+    name: String,
+}
+
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ServerConfig {
+    #[serde(default)]
+    enabled: bool,
     url: String,
+    #[serde(default)]
+    players_api_url: String,
     method: String,
     headers: serde_json::Value,
     timeout: u32,
@@ -119,7 +129,9 @@ fn ensure_default_config(dir: &PathBuf) {
     "camera_index": 0
   },
   "server": {
+    "enabled": false,
     "url": "http://localhost:3000/api/player",
+    "players_api_url": "",
     "method": "POST",
     "headers": {},
     "timeout": 5,
@@ -316,6 +328,81 @@ fn list_windows() -> Result<Vec<WindowInfo>, String> {
         ))
 }
 
+
+#[tauri::command]
+fn list_cameras() -> Result<Vec<CameraInfo>, String> {
+    let data_dir = get_facecam_dir();
+    let script_dir = get_script_dir();
+    let (program, mut args) = get_backend_command();
+    args.push("--list-cameras".to_string());
+
+    let output = Command::new(&program)
+        .args(&args)
+        .current_dir(&script_dir)
+        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("PYTHONIOENCODING", "utf-8")
+        .creation_flags(0x08000000)
+        .output()
+        .map_err(|e| format!("cmd={} {:?} — {}", program, args, e))?;
+
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+
+    if !output.status.success() && stdout.trim().is_empty() {
+        return Err(format!("Backend exited {:?}\nstderr: {}", output.status.code(), stderr));
+    }
+
+    // Find the JSON array line
+    let json_line = stdout.lines()
+        .filter(|l| l.trim_start().starts_with('['))
+        .last()
+        .unwrap_or("[]");
+
+    serde_json::from_str::<Vec<CameraInfo>>(json_line)
+        .map_err(|e| format!(
+            "JSON parse failed: {}\ncmd: {} {:?}\nstdout: {}\nstderr: {}",
+            e, program, args, stdout, stderr
+        ))
+}
+
+#[tauri::command]
+async fn open_camera_region_selector(app: tauri::AppHandle, camera_index: u32) -> Result<CommandResult, String> {
+    let data_dir = get_facecam_dir();
+    let script_dir = get_script_dir();
+    let (program, mut args) = get_backend_command();
+    args.push("--camera-region-select".to_string());
+    args.push("--camera-index".to_string());
+    args.push(camera_index.to_string());
+
+    let _ = app.emit("log", LogEvent {
+        level: "info".into(),
+        message: format!("Opening region selector for camera {}...", camera_index),
+    });
+
+    let output = Command::new(&program)
+        .args(&args)
+        .current_dir(&script_dir)
+        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
+        .env("PYTHONIOENCODING", "utf-8")
+        .creation_flags(0x00000000)  // Allow window for selector
+        .output();
+
+    match output {
+        Ok(out) => {
+            if out.status.success() {
+                let _ = app.emit("log", LogEvent {
+                    level: "success".into(),
+                    message: "Camera region selection complete!".into(),
+                });
+                Ok(CommandResult { success: true, message: "Camera region saved".into() })
+            } else {
+                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
+                Ok(CommandResult { success: false, message: format!("Selector failed: {}", stderr) })
+            }
+        }
+        Err(e) => Err(format!("Failed to start camera region selector: {}", e)),
+    }
+}
 
 // ── Player Name Commands ─────────────────────────────────────────────
 
@@ -641,7 +728,9 @@ pub fn run() {
             load_config,
             save_config,
             list_windows,
+            list_cameras,
             open_window_region_selector,
+            open_camera_region_selector,
             load_players,
             save_players,
             add_player,

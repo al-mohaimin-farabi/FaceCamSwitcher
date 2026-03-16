@@ -23,10 +23,7 @@ os.environ["PP_LOG_LEVEL"]       = "40"
 os.environ["PADDLEX_LOG_LEVEL"]  = "40"
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 os.environ["FLAGS_call_stack_level"] = "0"
-
-# ── Force matplotlib to use a non-GUI backend so tkinter is never imported ──
-import matplotlib
-matplotlib.use('Agg')
+os.environ["MPLBACKEND"] = "Agg"   # prevent matplotlib from importing tkinter
 
 # ── Force DPI Awareness on Windows (Critical for correct screen capture/coords) ──
 if os.name == 'nt':
@@ -151,6 +148,28 @@ def _load_player_names() -> list[str]:
     return names
 
 
+def list_cameras(max_index: int = 10) -> list[dict]:
+    """
+    Enumerate available camera devices (physical and virtual, e.g. OBS, vMix).
+    Returns a list of {index, name} dicts for every camera that opens successfully.
+    Uses DirectShow on Windows so virtual cameras (OBS, vMix, NDI) are included.
+    """
+    import cv2
+    cameras = []
+    for i in range(max_index):
+        cap = cv2.VideoCapture(i, cv2.CAP_DSHOW)
+        if cap.isOpened():
+            # Try to get a device name via the backend property
+            name = cap.getBackendName() or f"Camera {i}"
+            # VideoCapture doesn't expose friendly names; use generic label
+            name = f"Camera {i}"
+            cap.release()
+            cameras.append({"index": i, "name": name})
+        else:
+            cap.release()
+    return cameras
+
+
 class OCREngine:
     """Wraps PaddleOCR with region capture and fuzzy matching."""
 
@@ -206,8 +225,6 @@ class OCREngine:
         self.ocr = PaddleOCR(
             lang=self.lang,
             device=device,
-            enable_mkldnn=False,
-            use_textline_orientation=True,
         )
         print("[OCR] PaddleOCR ready [OK]")
 
@@ -305,13 +322,62 @@ class OCREngine:
 
         return img
 
+    def capture_camera_pil(self) -> Image.Image:
+        """Capture a frame from a camera (physical or virtual) by index, then crop to region."""
+        import cv2
+        idx = self.input_source.get("camera_index", 0)
+        cap = cv2.VideoCapture(idx, cv2.CAP_DSHOW)
+        if not cap.isOpened():
+            # fallback: try without backend hint
+            cap = cv2.VideoCapture(idx)
+        if not cap.isOpened():
+            raise ValueError(f"Cannot open camera index {idx}. Make sure the camera/virtual camera is running.")
+
+        # Set high resolution so region crops work well
+        cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+        cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+        # Grab a couple of frames to allow the camera to settle
+        for _ in range(3):
+            cap.grab()
+        ret, frame = cap.read()
+        cap.release()
+
+        if not ret or frame is None:
+            raise ValueError(f"Failed to read frame from camera index {idx}.")
+
+        # Convert BGR (OpenCV) → RGB
+        frame_rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        img = Image.fromarray(frame_rgb)
+
+        # Crop to configured region if one is set
+        r = self.input_source.get("window_region", {})
+        rw = r.get("width", 0)
+        rh = r.get("height", 0)
+        if rw > 0 and rh > 0:
+            box = (r.get("left", 0), r.get("top", 0),
+                   r.get("left", 0) + rw, r.get("top", 0) + rh)
+            # clamp to image boundaries
+            iw, ih = img.size
+            box = (max(0, box[0]), max(0, box[1]),
+                   min(iw, box[2]), min(ih, box[3]))
+            if box[2] > box[0] and box[3] > box[1]:
+                img = img.crop(box)
+
+        return img
+
     def capture_and_recognise(self) -> tuple[Image.Image, list[dict]]:
-        """Capture from the configured window source and run OCR."""
-        hwnd = self.input_source.get("window_hwnd", 0)
-        if hwnd:
-            pil_img = self.capture_window_pil()
+        """Capture from the configured input source and run OCR."""
+        src_type = self.input_source.get("type", "window")
+
+        if src_type == "camera":
+            pil_img = self.capture_camera_pil()
         else:
-            pil_img = self.capture_region_pil()
+            hwnd = self.input_source.get("window_hwnd", 0)
+            if hwnd:
+                pil_img = self.capture_window_pil()
+            else:
+                pil_img = self.capture_region_pil()
 
         processed = self._preprocess_image(pil_img)
         frame = np.array(processed)
