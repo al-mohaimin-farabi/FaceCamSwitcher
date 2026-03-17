@@ -4,7 +4,8 @@ from PyInstaller.utils.hooks import copy_metadata
 
 datas = []
 binaries = [('C:\\Users\\THEMIS\\AppData\\Local\\Programs\\Python\\Python312\\Lib\\site-packages\\0deeb2fec52624e647be__mypyc.cp312-win_amd64.pyd', '.')]
-hiddenimports = ['paddleocr', 'paddle', 'paddlex', 'thefuzz', 'Levenshtein', 'mss', 'requests', 'PIL', 'PIL._imaging', 'shapely', 'shapely.geometry', 'pyclipper', 'skimage', 'skimage.morphology', 'skimage.filters', 'cv2', 'lmdb', 'rapidfuzz', 'scipy', 'scipy.special', 'numpy', 'paddle.base', 'paddle.base.core', 'paddle.utils', 'paddlex.utils', 'paddlex.pipelines', 'paddlex.modules', 'paddleocr.paddleocr']
+hiddenimports = ['paddleocr', 'paddle', 'paddlex', 'thefuzz', 'Levenshtein', 'mss', 'requests', 'pycocotools', 'PIL', 'PIL._imaging', 'shapely', 'shapely.geometry', 'pyclipper', 'skimage', 'skimage.morphology', 'skimage.filters', 'cv2', 'lxml', 'lxml.etree', 'lxml.html', 'lmdb', 'rapidfuzz', 'scipy', 'scipy.special', 'numpy', 'paddle.base', 'paddle.base.core', 'paddle.utils', 'paddlex.utils', 'paddlex.pipelines', 'paddlex.modules', 'paddleocr.paddleocr', 'soundfile', 'sounddevice', 'librosa', 'resampy', 'audioread', 'filelock', 'huggingface_hub', 'tqdm', 'yaml', 'omegaconf', 'antlr4', 'ftfy', 'regex', 'sentencepiece', 'prettytable', 'func_timeout', 'paddle.dataset', 'paddle.metric']
+datas += copy_metadata('paddlex')
 datas += copy_metadata('paddleocr')
 datas += copy_metadata('paddlex')
 datas += copy_metadata('paddlepaddle')
@@ -25,6 +26,12 @@ datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('skimage')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 tmp_ret = collect_all('scipy')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('soundfile')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('lxml')
+datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
+tmp_ret = collect_all('librosa')
 datas += tmp_ret[0]; binaries += tmp_ret[1]; hiddenimports += tmp_ret[2]
 
 
@@ -62,5 +69,4 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon=['D:\\Esports Works\\Free Fire\\Free Fire API\\FaceCam\\app\\src-tauri\\icons\\icon.ico'],
 )

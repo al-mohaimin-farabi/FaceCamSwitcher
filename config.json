@@ -1,38 +1,45 @@
 {
-  "input_source": {
-    "type": "window",
-    "window_hwnd": 327976,
-    "window_title": "Spotify Free",
-    "window_region": {
-      "left": 0,
-      "top": 0,
-      "width": 2559,
-      "height": 1439
+    "input_source": {
+        "type": "window",
+        "window_hwnd": 460270,
+        "window_title": "(3) Facebook - Brave",
+        "window_region": {
+            "left": 798,
+            "top": 1136,
+            "width": 273,
+            "height": 45
+        },
+        "camera_index": 0
     },
-    "camera_index": 2
-  },
-  "server": {
-    "enabled": false,
-    "url": "http://localhost:3000/api/facecam",
-    "players_api_url": "",
-    "method": "POST",
-    "headers": {
-      "Authorization": "Bearer YOUR_API_KEY_HERE",
-      "Content-Type": "application/json"
+    "server": {
+        "enabled": false,
+        "url": "http://localhost:3000/api/facecam",
+        "players_api_url": "",
+        "method": "POST",
+        "headers": {
+            "Authorization": "Bearer YOUR_API_KEY_HERE",
+            "Content-Type": "application/json"
+        },
+        "timeout": 2,
+        "retry_count": 1,
+        "retry_delay": 0.5
     },
-    "timeout": 2,
-    "retry_count": 1,
-    "retry_delay": 0.5
-  },
-  "ocr": {
-    "language": "en",
-    "confidence_threshold": 0.6,
-    "fuzzy_match_threshold": 70,
-    "use_gpu": false
-  },
-  "capture": {
-    "interval_seconds": 1,
-    "save_debug_screenshots": false,
-    "debug_screenshot_dir": "debug_captures"
-  }
+    "ocr": {
+        "language": "en",
+        "confidence_threshold": 0.6,
+        "fuzzy_match_threshold": 70,
+        "use_gpu": false
+    },
+    "capture": {
+        "interval_seconds": 1,
+        "save_debug_screenshots": false,
+        "debug_screenshot_dir": "debug_captures"
+    },
+    "capture_region": {
+        "monitor_index": 2,
+        "left": 798,
+        "top": 1136,
+        "width": 273,
+        "height": 45
+    }
 }

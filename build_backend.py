@@ -23,8 +23,6 @@ from pathlib import Path
 
 BASE_DIR = Path(__file__).parent
 
-ICON_PATH = BASE_DIR / "app" / "src-tauri" / "icons" / "icon.ico"
-
 
 def _find_mypyc_binaries() -> list[str]:
     """
@@ -58,7 +56,6 @@ def build():
         "--noconfirm",
         "--onefile",
         "--console",       # need console for log output to Tauri
-        "--icon", str(ICON_PATH),
         "--name", "FaceCam_Backend",
         # Hidden imports that PyInstaller may miss
         "--hidden-import", "paddleocr",
@@ -68,6 +65,7 @@ def build():
         "--hidden-import", "Levenshtein",
         "--hidden-import", "mss",
         "--hidden-import", "requests",
+        "--hidden-import", "pycocotools",
         "--hidden-import", "PIL",
         "--hidden-import", "PIL._imaging",
         "--hidden-import", "shapely",
@@ -77,6 +75,9 @@ def build():
         "--hidden-import", "skimage.morphology",
         "--hidden-import", "skimage.filters",
         "--hidden-import", "cv2",
+        "--hidden-import", "lxml",
+        "--hidden-import", "lxml.etree",
+        "--hidden-import", "lxml.html",
         "--hidden-import", "lmdb",
         "--hidden-import", "rapidfuzz",
         "--hidden-import", "scipy",
@@ -89,16 +90,40 @@ def build():
         "--hidden-import", "paddlex.pipelines",
         "--hidden-import", "paddlex.modules",
         "--hidden-import", "paddleocr.paddleocr",
+        # Audio / signal processing deps pulled in by paddleocr/paddlex
+        "--hidden-import", "soundfile",
+        "--hidden-import", "sounddevice",
+        "--hidden-import", "librosa",
+        "--hidden-import", "resampy",
+        "--hidden-import", "audioread",
+        # Other commonly-missed paddleocr deps
+        "--hidden-import", "filelock",
+        "--hidden-import", "huggingface_hub",
+        "--hidden-import", "tqdm",
+        "--hidden-import", "yaml",
+        "--hidden-import", "omegaconf",
+        "--hidden-import", "antlr4",
+        "--hidden-import", "ftfy",
+        "--hidden-import", "regex",
+        "--hidden-import", "sentencepiece",
+        "--hidden-import", "prettytable",
+        "--hidden-import", "func_timeout",
+        "--hidden-import", "paddle.dataset",
+        "--hidden-import", "paddle.metric",
         # Collect the full paddleocr, paddle & paddlex package data
         # paddlex must be collected so its configs/pipelines/*.yaml files are
         # bundled — PaddleOCR 3.x resolves pipeline configs via __file__ inside
         # paddlex, which breaks in a frozen exe without this.
+        '--copy-metadata', 'paddlex', # Copy paddlex metadata
         "--collect-all", "paddleocr",
         "--collect-all", "paddle",
         "--collect-all", "paddlex",
         "--collect-all", "shapely",
         "--collect-all", "skimage",
         "--collect-all", "scipy",
+        "--collect-all", "soundfile",
+        "--collect-all", "lxml",
+        "--collect-all", "librosa",
         # Copy package metadata so importlib.metadata works inside the frozen exe.
         # Without this, paddlex's dependency checker (is_dep_available) fails
         # because it cannot find .dist-info directories.
@@ -111,6 +136,8 @@ def build():
         "--copy-metadata", "numpy",
         "--copy-metadata", "opencv-python",
         "--copy-metadata", "packaging",
+        # Note: soundfile has no .dist-info on this system — metadata copy skipped,
+        # but the module itself is collected via --collect-all soundfile above.
         # mypyc .pyd files that live in site-packages root (PyInstaller misses them)
         *_find_mypyc_binaries(),
         # Entry point

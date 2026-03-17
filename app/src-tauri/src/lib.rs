@@ -201,7 +201,10 @@ fn get_players_path() -> PathBuf {
 /// Returns (program, prefix_args) for the Python backend.
 /// Also sets FACECAM_DATA_DIR so the backend knows where to find config/players.
 fn get_backend_command() -> (String, Vec<String>) {
-    // Production: FaceCam_Backend.exe is placed next to the main exe by Tauri's externalBin.
+    // Production only: use the bundled FaceCam_Backend.exe sidecar.
+    // In debug/dev builds always fall through to Python so stale sidecar
+    // copies next to the debug exe don't get picked up accidentally.
+    #[cfg(not(debug_assertions))]
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             let backend = parent.join("FaceCam_Backend.exe");

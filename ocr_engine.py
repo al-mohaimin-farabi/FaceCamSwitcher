@@ -23,6 +23,7 @@ os.environ["PP_LOG_LEVEL"]       = "40"
 os.environ["PADDLEX_LOG_LEVEL"]  = "40"
 os.environ["PADDLE_PDX_DISABLE_MODEL_SOURCE_CHECK"] = "True"
 os.environ["FLAGS_call_stack_level"] = "0"
+os.environ["FLAGS_use_mkldnn"] = "0"
 os.environ["MPLBACKEND"] = "Agg"   # prevent matplotlib from importing tkinter
 
 # ── Force DPI Awareness on Windows (Critical for correct screen capture/coords) ──
@@ -169,6 +170,113 @@ def list_cameras(max_index: int = 10) -> list[dict]:
     return cameras
 
 
+# ──────────────────────────────────────────────────────────────────────
+# PaddleOCR singleton — PaddleX 3.x raises "PDX has already been
+# initialized" if PaddleOCR() is called more than once per process.
+# Cache the instance here so OCREngine can be reconstructed safely.
+# ──────────────────────────────────────────────────────────────────────
+_paddle_ocr_instance = None
+_paddle_ocr_lang = None
+_paddle_ocr_device = None
+
+
+def _get_or_create_paddleocr(lang: str, device: str):
+    global _paddle_ocr_instance, _paddle_ocr_lang, _paddle_ocr_device
+
+    if _paddle_ocr_instance is not None:
+        if _paddle_ocr_lang == lang and _paddle_ocr_device == device:
+            print("[OCR] Reusing existing PaddleOCR instance")
+            return _paddle_ocr_instance
+        # Config changed — warn but reuse anyway (can't reinit)
+        print(f"[OCR] Warning: PaddleOCR already initialized with lang={_paddle_ocr_lang} "
+              f"device={_paddle_ocr_device}. Reusing existing instance.")
+        return _paddle_ocr_instance
+
+    # ── PyInstaller frozen-env fix ────────────────────────────────────
+    # Patch importlib.metadata so paddlex's dep checker doesn't raise
+    # DependencyError for packages that are bundled but lack .dist-info.
+    # NOTE: We do NOT import paddlex.utils.deps here — doing so triggers
+    # PDX's global initialization as a side-effect, which then causes
+    # PaddleOCR() below to raise "PDX has already been initialized".
+    # The importlib.metadata patch alone is sufficient.
+    if getattr(sys, "frozen", False):
+        try:
+            import importlib.metadata
+            _orig_requires = importlib.metadata.requires
+            _orig_version = importlib.metadata.version
+
+            def _mock_requires(pkg):
+                if pkg == "paddlex":
+                    return []
+                try:
+                    return _orig_requires(pkg)
+                except Exception:
+                    return []
+
+            def _mock_version(pkg):
+                return "3.0.0" if pkg == "paddlex" else _orig_version(pkg)
+
+            importlib.metadata.requires = _mock_requires
+            importlib.metadata.version = _mock_version
+            print("[OCR] Patched importlib.metadata for frozen env")
+        except Exception as patch_err:
+            print(f"[OCR] Warning: could not patch importlib.metadata: {patch_err}")
+
+    # ── Stub out optional deps paddleocr imports but doesn't need for OCR ──
+    # paddleocr/paddlex dynamically imports audio and other optional packages.
+    # In the frozen exe these aren't bundled (and aren't needed for text OCR).
+    # Injecting empty stub modules prevents ModuleNotFoundError at init time.
+    import types as _types
+    for _stub in [
+        "soundfile", "sounddevice", "librosa", "resampy", "audioread",
+        "audioread.rawread", "lxml", "lxml.etree", "lxml.html",
+        "antlr4", "sentencepiece", "ftfy", "premailer",
+    ]:
+        if _stub not in sys.modules:
+            sys.modules[_stub] = _types.ModuleType(_stub)
+
+    try:
+        from paddleocr import PaddleOCR as _PaddleOCR
+        instance = _PaddleOCR(lang=lang, device=device, enable_mkldnn=False)
+        _paddle_ocr_instance = instance
+        _paddle_ocr_lang = lang
+        _paddle_ocr_device = device
+        return instance
+    except Exception as first_err:
+        # Handle "PDX already initialized" gracefully — try to get existing instance
+        err_str = str(first_err)
+        if "already been initialized" in err_str or "Reinitialization" in err_str:
+            # PaddleX singleton is set but we have no cached reference — attempt
+            # to construct without triggering the global init again.
+            # This happens if the process is reused between OCR sessions.
+            try:
+                from paddleocr import PaddleOCR as _PaddleOCR
+                # Try with suppress_log flag variants that exist in some builds
+                instance = object.__new__(_PaddleOCR)
+                # Fall back: just return a wrapper that tries predict via the class
+                # If construction truly fails, raise a clear error
+                raise RuntimeError(
+                    "PaddleOCR singleton conflict — please restart FaceCam completely "
+                    "(close the app and reopen it) to reset the OCR engine."
+                ) from first_err
+            except RuntimeError:
+                raise
+            except Exception:
+                pass
+        if isinstance(first_err, ModuleNotFoundError):
+            raise RuntimeError(
+                f"PaddleOCR failed to initialize.\n"
+                f"  paddleocr wrapper error: {first_err}\n"
+                f"  Missing module '{first_err.name}' — rebuild FaceCam_Backend.exe:\n"
+                f"    cd FaceCam && python build_backend.py"
+            ) from first_err
+        raise RuntimeError(
+            f"PaddleOCR failed to initialize.\n"
+            f"  paddleocr wrapper error: {first_err}\n"
+            f"Run: pip uninstall paddleocr paddlex -y && pip install paddleocr==3.4.0"
+        ) from first_err
+
+
 class OCREngine:
     """Wraps PaddleOCR with region capture and fuzzy matching."""
 
@@ -212,76 +320,13 @@ class OCREngine:
             }
         print(f"[OCR] Input source: hwnd={self.input_source.get('window_hwnd', 0)}")
 
-        # Initialize PaddleOCR v3.x
+        # Initialize PaddleOCR v3.x (singleton — PaddleX only allows one init per process)
         print("[OCR] Initializing PaddleOCR ...")
         device = "gpu" if self.use_gpu else "cpu"
         logging.getLogger('ppocr').setLevel(logging.ERROR)
 
-        # ── PyInstaller frozen-env fix ────────────────────────────────
-        # Inside a PyInstaller bundle, importlib.metadata cannot find
-        # package metadata (.dist-info), so paddlex's dependency checker
-        # (is_dep_available) reports every dependency as missing and
-        # raises DependencyError.  Since PyInstaller already bundles all
-        # required code, we monkey-patch the checker to always pass.
-        if getattr(sys, "frozen", False):
-            try:
-                import paddlex.utils.deps as _pdx_deps
-                _pdx_deps.is_dep_available = lambda dep, /, check_version=False: True
-                _pdx_deps.is_dep_available.__wrapped__ = True  # tag so we can tell
-                _pdx_deps.is_extra_available = lambda extra: True
-                # Clear cached results that may already be False
-                if hasattr(_pdx_deps.is_dep_available, "cache_clear"):
-                    _pdx_deps.is_dep_available.cache_clear()
-                if hasattr(_pdx_deps.is_extra_available, "cache_clear"):
-                    _pdx_deps.is_extra_available.cache_clear()
-                print("[OCR] Patched paddlex dependency checker for frozen env")
-            except Exception as patch_err:
-                print(f"[OCR] Warning: could not patch dep checker: {patch_err}")
-
-        try:
-            from paddleocr import PaddleOCR as _PaddleOCR
-            self.ocr = _PaddleOCR(lang=self.lang, device=device)
-            self._ocr_backend = "paddleocr"
-        except Exception as first_err:
-            print(f"[OCR] PaddleOCR wrapper failed: {first_err}")
-            # paddlex registry lookup failed — find the OCR.yaml config and pass the
-            # full file path so paddlex skips the broken registry and loads directly.
-            try:
-                import paddlex as _px
-                from paddlex import create_pipeline as _create_pipeline
-
-                import glob as _glob
-                _px_dir = Path(_px.__file__).parent
-                # Search common locations for the pipeline config
-                _candidates = [
-                    _px_dir / "configs" / "pipelines" / "OCR.yaml",
-                    _px_dir / "pipelines" / "OCR.yaml",
-                    _px_dir / "pipelines" / "ocr" / "OCR.yaml",
-                    _px_dir / "repo_apis" / "paddleocr_api" / "pipelines" / "OCR.yaml",
-                ]
-                _cfg = next((p for p in _candidates if p.exists()), None)
-
-                # Full recursive search as last resort
-                if not _cfg:
-                    _found = _glob.glob(str(_px_dir / "**" / "OCR.yaml"), recursive=True)
-                    if _found:
-                        _cfg = Path(_found[0])
-
-                if _cfg:
-                    print(f"[OCR] Using config: {_cfg}")
-                    self.ocr = _create_pipeline(pipeline=str(_cfg), device=device)
-                else:
-                    print(f"[OCR] OCR.yaml not found in {_px_dir}, trying pipeline name...")
-                    self.ocr = _create_pipeline(pipeline="OCR", device=device)
-
-                self._ocr_backend = "paddlex"
-            except Exception as second_err:
-                raise RuntimeError(
-                    f"PaddleOCR failed to initialize.\n"
-                    f"  paddleocr wrapper error: {first_err}\n"
-                    f"  paddlex direct error:    {second_err}\n"
-                    f"Run: pip uninstall paddleocr paddlex -y && pip install paddleocr==3.4.0"
-                ) from second_err
+        self.ocr = _get_or_create_paddleocr(lang=self.lang, device=device)
+        self._ocr_backend = "paddleocr"
 
         print("[OCR] PaddleOCR ready [OK]")
 
