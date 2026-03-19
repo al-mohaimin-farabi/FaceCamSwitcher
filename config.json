@@ -1,45 +1,52 @@
 {
-    "input_source": {
-        "type": "window",
-        "window_hwnd": 460270,
-        "window_title": "(3) Facebook - Brave",
-        "window_region": {
-            "left": 798,
-            "top": 1136,
-            "width": 273,
-            "height": 45
-        },
-        "camera_index": 0
+  "input_source": {
+    "type": "window",
+    "window_hwnd": 131948,
+    "window_title": "Friends - Discord",
+    "window_region": {
+      "left": 403,
+      "top": 634,
+      "width": 131,
+      "height": 29
     },
-    "server": {
-        "enabled": false,
-        "url": "http://localhost:3000/api/facecam",
-        "players_api_url": "",
-        "method": "POST",
-        "headers": {
-            "Authorization": "Bearer YOUR_API_KEY_HERE",
-            "Content-Type": "application/json"
-        },
-        "timeout": 2,
-        "retry_count": 1,
-        "retry_delay": 0.5
+    "camera_index": 10002
+  },
+  "server": {
+    "enabled": false,
+    "url": "http://localhost:3000/api/facecam",
+    "players_api_url": "",
+    "method": "POST",
+    "headers": {
+      "Authorization": "Bearer YOUR_API_KEY_HERE",
+      "Content-Type": "application/json"
     },
-    "ocr": {
-        "language": "en",
-        "confidence_threshold": 0.6,
-        "fuzzy_match_threshold": 70,
-        "use_gpu": false
+    "timeout": 2,
+    "retry_count": 1,
+    "retry_delay": 0.5
+  },
+  "ocr": {
+    "language": "en",
+    "confidence_threshold": 0.6,
+    "fuzzy_match_threshold": 70,
+    "use_gpu": false
+  },
+  "capture": {
+    "interval_seconds": 0.1,
+    "save_debug_screenshots": false,
+    "debug_screenshot_dir": "debug_captures"
+  },
+  "saved_regions": {
+    "*I want to make a Stand-alone FaceCa - Notepad": {
+      "left": 9,
+      "top": 249,
+      "width": 235,
+      "height": 43
     },
-    "capture": {
-        "interval_seconds": 1,
-        "save_debug_screenshots": false,
-        "debug_screenshot_dir": "debug_captures"
-    },
-    "capture_region": {
-        "monitor_index": 2,
-        "left": 798,
-        "top": 1136,
-        "width": 273,
-        "height": 45
+    "@JARV!S - Discord": {
+      "left": 59,
+      "top": 325,
+      "width": 222,
+      "height": 37
     }
+  }
 }

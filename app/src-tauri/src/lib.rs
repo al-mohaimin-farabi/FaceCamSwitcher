@@ -1,20 +1,38 @@
+mod capture;
+mod matcher;
+mod ocr;
+
 use serde::{Deserialize, Serialize};
 use std::fs;
-use std::io::{BufRead, BufReader};
-use std::os::windows::process::CommandExt;
 use std::path::PathBuf;
-use std::process::{Command, Stdio};
-use std::sync::Mutex;
-use tauri::{Emitter, State};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex};
+use tauri::{AppHandle, Emitter, Manager};
+use tokio::time::{interval, Duration};
 
 // ── State ────────────────────────────────────────────────────────────
-struct AppState {
-    ocr_pid: Mutex<Option<u32>>,
+
+struct OcrState {
+    running: AtomicBool,
+    matcher: Mutex<matcher::FuzzyMatcher>,
+}
+
+/// Holds captured image data for the region selector overlay window.
+struct RegionSelectorState {
+    image_b64: Mutex<Option<String>>,
+    original_width: Mutex<u32>,
+    original_height: Mutex<u32>,
+    /// Which source opened the selector: "window" or "camera"
+    source_type: Mutex<String>,
+    /// HWND of the window being selected (for window mode)
+    source_hwnd: Mutex<i64>,
+    /// Camera index (for camera mode)
+    source_camera: Mutex<u32>,
 }
 
 #[derive(Clone, Serialize)]
 struct LogEvent {
-    level: String,   // "info", "success", "warning", "error"
+    level: String,
     message: String,
 }
 
@@ -35,7 +53,7 @@ struct WindowRegion {
 #[derive(Serialize, Deserialize, Clone)]
 struct InputSource {
     #[serde(rename = "type")]
-    source_type: String,    // "window" | "camera"
+    source_type: String,
     #[serde(default)]
     window_hwnd: i64,
     #[serde(default)]
@@ -47,7 +65,12 @@ struct InputSource {
 }
 
 fn default_window_region() -> WindowRegion {
-    WindowRegion { left: 0, top: 0, width: 530, height: 193 }
+    WindowRegion {
+        left: 0,
+        top: 0,
+        width: 530,
+        height: 193,
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -61,7 +84,6 @@ struct CameraInfo {
     index: u32,
     name: String,
 }
-
 
 #[derive(Serialize, Deserialize, Clone)]
 struct ServerConfig {
@@ -87,7 +109,7 @@ struct OcrConfig {
 
 #[derive(Serialize, Deserialize, Clone)]
 struct CaptureConfig {
-    interval_seconds: u32,
+    interval_seconds: f64,
     save_debug_screenshots: bool,
     debug_screenshot_dir: String,
 }
@@ -98,25 +120,24 @@ struct AppConfig {
     server: ServerConfig,
     ocr: OcrConfig,
     capture: CaptureConfig,
+    #[serde(default)]
+    saved_regions: std::collections::HashMap<String, WindowRegion>,
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
 const APP_DATA_SUBDIR: &str = "EfinityFaceCam";
 
-/// Returns %APPDATA%\EfinityFaceCam — the writable user-data directory.
 fn get_app_data_dir() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
         return PathBuf::from(appdata).join(APP_DATA_SUBDIR);
     }
-    // Fallback: next to the exe
     std::env::current_exe()
         .ok()
         .and_then(|p| p.parent().map(|p| p.to_path_buf()))
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
-/// Create default config.json and Players Name.txt if they don't exist.
 fn ensure_default_config(dir: &PathBuf) {
     let config_path = dir.join("config.json");
     if !config_path.exists() {
@@ -145,7 +166,7 @@ fn ensure_default_config(dir: &PathBuf) {
     "use_gpu": false
   },
   "capture": {
-    "interval_seconds": 2,
+    "interval_seconds": 0.1,
     "save_debug_screenshots": false,
     "debug_screenshot_dir": ""
   }
@@ -159,12 +180,9 @@ fn ensure_default_config(dir: &PathBuf) {
     }
 }
 
-/// Get the directory where config.json and Players Name.txt live.
-/// Search order: dev repo root → AppData (production / first run)
 fn get_facecam_dir() -> PathBuf {
     let mut search_dirs = Vec::new();
 
-    // Dev: exe is inside app/src-tauri/target/debug — walk up to FaceCam/
     if let Ok(exe_path) = std::env::current_exe() {
         if let Some(parent) = exe_path.parent() {
             search_dirs.push(parent.to_path_buf());
@@ -174,7 +192,6 @@ fn get_facecam_dir() -> PathBuf {
         search_dirs.push(cwd.clone());
         search_dirs.push(cwd.join("..").join(".."));
     }
-    // Production: AppData
     search_dirs.push(get_app_data_dir());
 
     for dir in &search_dirs {
@@ -183,7 +200,6 @@ fn get_facecam_dir() -> PathBuf {
         }
     }
 
-    // No config found anywhere — bootstrap defaults in AppData
     let data_dir = get_app_data_dir();
     let _ = fs::create_dir_all(&data_dir);
     ensure_default_config(&data_dir);
@@ -198,75 +214,87 @@ fn get_players_path() -> PathBuf {
     get_facecam_dir().join("Players Name.txt")
 }
 
-/// Returns (program, prefix_args) for the Python backend.
-/// Also sets FACECAM_DATA_DIR so the backend knows where to find config/players.
-fn get_backend_command() -> (String, Vec<String>) {
-    // Production only: use the bundled FaceCam_Backend.exe sidecar.
-    // In debug/dev builds always fall through to Python so stale sidecar
-    // copies next to the debug exe don't get picked up accidentally.
-    #[cfg(not(debug_assertions))]
+fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
+    // Helper: check if a directory contains the required model files
+    fn has_models(dir: &PathBuf) -> bool {
+        dir.join("det.onnx").exists()
+            && dir.join("rec.onnx").exists()
+            && dir.join("en_dict.txt").exists()
+    }
+
+    let mut checked: Vec<String> = Vec::new();
+
+    // 1. Tauri resource directory (official bundle path)
+    if let Ok(res_dir) = app.path().resource_dir() {
+        let models_sub = res_dir.join("models");
+        checked.push(format!("resource_dir/models: {}", models_sub.display()));
+        if has_models(&models_sub) {
+            println!("[MODELS] Found at Tauri resource_dir: {}", models_sub.display());
+            return Some(models_sub);
+        }
+        checked.push(format!("resource_dir: {}", res_dir.display()));
+        if has_models(&res_dir) {
+            println!("[MODELS] Found at Tauri resource_dir root: {}", res_dir.display());
+            return Some(res_dir);
+        }
+    }
+
+    // 2. Next to the executable (NSIS installs put models/ next to .exe)
     if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(parent) = exe_path.parent() {
-            let backend = parent.join("FaceCam_Backend.exe");
-            if backend.exists() {
-                return (backend.to_string_lossy().to_string(), vec![]);
+        // Canonicalize to resolve symlinks/junctions and \\?\ prefixes
+        let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
+        if let Some(exe_dir) = exe_path.parent() {
+            let candidate = exe_dir.join("models");
+            checked.push(format!("exe_dir/models: {}", candidate.display()));
+            if has_models(&candidate) {
+                println!("[MODELS] Found next to exe: {}", candidate.display());
+                return Some(candidate);
+            }
+
+            // Dev: target/debug -> src-tauri/models
+            let candidate_dev = exe_dir.join("..").join("..").join("models");
+            checked.push(format!("dev(../../models): {}", candidate_dev.display()));
+            if has_models(&candidate_dev) {
+                println!("[MODELS] Found in dev path: {}", candidate_dev.display());
+                return Some(candidate_dev);
+            }
+
+            // Dev: deeper repo root
+            let candidate_dev2 = exe_dir
+                .join("..").join("..").join("..").join("..").join("models");
+            checked.push(format!("dev(../../../../models): {}", candidate_dev2.display()));
+            if has_models(&candidate_dev2) {
+                println!("[MODELS] Found in repo root: {}", candidate_dev2.display());
+                return Some(candidate_dev2);
             }
         }
     }
 
-    // Dev fallback: use Python + facecam_backend.py
-    let python = if Command::new("python")
-        .arg("--version")
-        .creation_flags(0x08000000)
-        .output()
-        .map(|o| o.status.success())
-        .unwrap_or(false)
-    {
-        "python".to_string()
-    } else {
-        "python3".to_string()
-    };
-
-    // Search for facecam_backend.py independently of the data dir.
-    // In dev, the Tauri exe is at app/src-tauri/target/debug/ so we walk up,
-    // and cwd is typically app/ so cwd/.. = FaceCam/.
-    let mut script_dirs: Vec<PathBuf> = vec![];
-    if let Ok(exe_path) = std::env::current_exe() {
-        if let Some(p) = exe_path.parent() {
-            // debug/  ->  target/  ->  src-tauri/  ->  app/  ->  FaceCam/
-            script_dirs.push(p.join("..").join("..").join("..").join(".."));
-        }
-    }
+    // 3. CWD-relative
     if let Ok(cwd) = std::env::current_dir() {
-        script_dirs.push(cwd.join(".."));  // app/ -> FaceCam/
-        script_dirs.push(cwd.clone());
-    }
-
-    let script = script_dirs
-        .iter()
-        .map(|d| d.join("facecam_backend.py"))
-        .find(|p| p.exists())
-        .map(|p| p.to_string_lossy().to_string())
-        .unwrap_or_else(|| "facecam_backend.py".to_string());
-
-    (python, vec![script])
-}
-
-/// Returns the directory that contains facecam_backend.py (used as cwd when
-/// spawning Python so that sibling imports like `ocr_engine` resolve correctly).
-/// In production this is the same as the exe dir; in dev it's the FaceCam/ root.
-fn get_script_dir() -> PathBuf {
-    let (_, args) = get_backend_command();
-    if let Some(script) = args.first() {
-        if let Some(parent) = PathBuf::from(script).parent() {
-            return parent.to_path_buf();
+        let candidate = cwd.join("models");
+        checked.push(format!("cwd/models: {}", candidate.display()));
+        if has_models(&candidate) {
+            println!("[MODELS] Found in CWD: {}", candidate.display());
+            return Some(candidate);
         }
     }
-    // Production: exe dir (FaceCam_Backend.exe has no script arg)
-    std::env::current_exe()
-        .ok()
-        .and_then(|p| p.parent().map(|p| p.to_path_buf()))
-        .unwrap_or_else(|| PathBuf::from("."))
+
+    // 4. AppData
+    let appdata_models = get_app_data_dir().join("models");
+    checked.push(format!("appdata/models: {}", appdata_models.display()));
+    if has_models(&appdata_models) {
+        println!("[MODELS] Found in AppData: {}", appdata_models.display());
+        return Some(appdata_models);
+    }
+
+    // Log all checked paths for debugging
+    eprintln!("[WARN] ONNX models not found. Checked paths:");
+    for p in &checked {
+        eprintln!("  - {}", p);
+    }
+
+    None
 }
 
 // ── Config Commands ──────────────────────────────────────────────────
@@ -274,10 +302,10 @@ fn get_script_dir() -> PathBuf {
 #[tauri::command]
 fn load_config() -> Result<AppConfig, String> {
     let path = get_config_path();
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read config: {}", e))?;
-    let config: AppConfig = serde_json::from_str(&content)
-        .map_err(|e| format!("Failed to parse config: {}", e))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read config: {}", e))?;
+    let config: AppConfig =
+        serde_json::from_str(&content).map_err(|e| format!("Failed to parse config: {}", e))?;
     Ok(config)
 }
 
@@ -286,124 +314,198 @@ fn save_config(config: AppConfig) -> Result<CommandResult, String> {
     let path = get_config_path();
     let content = serde_json::to_string_pretty(&config)
         .map_err(|e| format!("Failed to serialize config: {}", e))?;
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write config: {}", e))?;
+    fs::write(&path, content).map_err(|e| format!("Failed to write config: {}", e))?;
     Ok(CommandResult {
         success: true,
         message: "Configuration saved".into(),
     })
 }
 
+// ── Window Enumeration (native via xcap) ────────────────────────────
+
 #[tauri::command]
 fn list_windows() -> Result<Vec<WindowInfo>, String> {
-    let data_dir = get_facecam_dir();
-    let script_dir = get_script_dir();
-    let (program, mut args) = get_backend_command();
-    args.push("--list-windows".to_string());
-
-    let output = Command::new(&program)
-        .args(&args)
-        .current_dir(&script_dir)
-        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
-        .env("PYTHONIOENCODING", "utf-8")
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("cmd={} {:?} — {}", program, args, e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    // If the process failed entirely, surface the error
-    if !output.status.success() && stdout.trim().is_empty() {
-        return Err(format!("Backend exited {:?}\nstderr: {}", output.status.code(), stderr));
-    }
-
-    // Find the JSON array line (the last line that starts with '[')
-    let json_line = stdout.lines()
-        .filter(|l| l.trim_start().starts_with('['))
-        .last()
-        .unwrap_or("[]");
-
-    serde_json::from_str::<Vec<WindowInfo>>(json_line)
-        .map_err(|e| format!(
-            "JSON parse failed: {}\ncmd: {} {:?}\nstdout: {}\nstderr: {}",
-            e, program, args, stdout, stderr
-        ))
+    let windows = capture::list_all_windows()?;
+    Ok(windows
+        .into_iter()
+        .map(|(hwnd, title)| WindowInfo {
+            hwnd: hwnd as i64,
+            title,
+        })
+        .collect())
 }
-
 
 #[tauri::command]
 fn list_cameras() -> Result<Vec<CameraInfo>, String> {
-    let data_dir = get_facecam_dir();
-    let script_dir = get_script_dir();
-    let (program, mut args) = get_backend_command();
-    args.push("--list-cameras".to_string());
+    // Use DirectShow enumeration for the complete list of devices
+    // (including virtual cameras like OBS, vMix, NDI).
+    // DirectShow indices match the order that nokhwa/MF uses on Windows.
+    let ds_devices = enumerate_directshow_video_devices().unwrap_or_default();
 
-    let output = Command::new(&program)
-        .args(&args)
-        .current_dir(&script_dir)
-        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
-        .env("PYTHONIOENCODING", "utf-8")
-        .creation_flags(0x08000000)
-        .output()
-        .map_err(|e| format!("cmd={} {:?} — {}", program, args, e))?;
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
-
-    if !output.status.success() && stdout.trim().is_empty() {
-        return Err(format!("Backend exited {:?}\nstderr: {}", output.status.code(), stderr));
+    if !ds_devices.is_empty() {
+        return Ok(ds_devices);
     }
 
-    // Find the JSON array line
-    let json_line = stdout.lines()
-        .filter(|l| l.trim_start().starts_with('['))
-        .last()
-        .unwrap_or("[]");
+    // Fallback: MF enumeration
+    let mf_devices = enumerate_mf_video_devices().unwrap_or_default();
+    if !mf_devices.is_empty() {
+        return Ok(mf_devices);
+    }
 
-    serde_json::from_str::<Vec<CameraInfo>>(json_line)
-        .map_err(|e| format!(
-            "JSON parse failed: {}\ncmd: {} {:?}\nstdout: {}\nstderr: {}",
-            e, program, args, stdout, stderr
-        ))
+    // Last resort: nokhwa
+    use nokhwa::utils::CameraIndex;
+    let cameras = nokhwa::query(nokhwa::utils::ApiBackend::Auto)
+        .map_err(|e| format!("Failed to enumerate cameras: {e}"))?;
+    Ok(cameras
+        .into_iter()
+        .map(|cam| {
+            let index = match cam.index() {
+                CameraIndex::Index(i) => *i,
+                CameraIndex::String(_) => 0,
+            };
+            CameraInfo {
+                index,
+                name: cam.human_name().to_string(),
+            }
+        })
+        .collect())
 }
 
-#[tauri::command]
-async fn open_camera_region_selector(app: tauri::AppHandle, camera_index: u32) -> Result<CommandResult, String> {
-    let data_dir = get_facecam_dir();
-    let script_dir = get_script_dir();
-    let (program, mut args) = get_backend_command();
-    args.push("--camera-region-select".to_string());
-    args.push("--camera-index".to_string());
-    args.push(camera_index.to_string());
+/// Enumerate video devices using Media Foundation's MFEnumDeviceSources.
+/// This matches the indices used by capture_camera_frame.
+fn enumerate_mf_video_devices() -> Result<Vec<CameraInfo>, String> {
+    use windows::Win32::Media::MediaFoundation::*;
+    use windows::Win32::System::Com::*;
 
-    let _ = app.emit("log", LogEvent {
-        level: "info".into(),
-        message: format!("Opening region selector for camera {}...", camera_index),
-    });
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+        MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET)
+            .map_err(|e| format!("MFStartup failed: {e}"))?;
 
-    let output = Command::new(&program)
-        .args(&args)
-        .current_dir(&script_dir)
-        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
-        .env("PYTHONIOENCODING", "utf-8")
-        .creation_flags(0x00000000)  // Allow window for selector
-        .output();
+        let mut attributes: Option<IMFAttributes> = None;
+        MFCreateAttributes(&mut attributes, 1)
+            .map_err(|e| format!("MFCreateAttributes failed: {e}"))?;
+        let attributes = attributes.ok_or("MFCreateAttributes returned null")?;
 
-    match output {
-        Ok(out) => {
-            if out.status.success() {
-                let _ = app.emit("log", LogEvent {
-                    level: "success".into(),
-                    message: "Camera region selection complete!".into(),
-                });
-                Ok(CommandResult { success: true, message: "Camera region saved".into() })
-            } else {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                Ok(CommandResult { success: false, message: format!("Selector failed: {}", stderr) })
+        attributes.SetGUID(
+            &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
+            &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
+        ).map_err(|e| format!("SetGUID failed: {e}"))?;
+
+        let mut devices_ptr: *mut Option<IMFActivate> = std::ptr::null_mut();
+        let mut count: u32 = 0;
+        MFEnumDeviceSources(&attributes, &mut devices_ptr, &mut count)
+            .map_err(|e| format!("MFEnumDeviceSources failed: {e}"))?;
+
+        let mut result = Vec::new();
+
+        if count > 0 && !devices_ptr.is_null() {
+            let devices = std::slice::from_raw_parts(devices_ptr, count as usize);
+            for i in 0..count {
+                if let Some(ref activate) = devices[i as usize] {
+                    let mut name_ptr = windows::core::PWSTR::null();
+                    let mut name_len = 0u32;
+                    if activate.GetAllocatedString(
+                        &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
+                        &mut name_ptr,
+                        &mut name_len,
+                    ).is_ok() {
+                        let name = name_ptr.to_string().unwrap_or_default();
+                        if !name.is_empty() {
+                            result.push(CameraInfo {
+                                index: i,
+                                name,
+                            });
+                        }
+                        CoTaskMemFree(Some(name_ptr.as_ptr() as *const _));
+                    }
+                }
             }
+            CoTaskMemFree(Some(devices_ptr as *const _));
         }
-        Err(e) => Err(format!("Failed to start camera region selector: {}", e)),
+
+        MFShutdown().ok();
+        Ok(result)
+    }
+}
+
+/// Enumerate video input devices using DirectShow's ICreateDevEnum COM interface.
+/// This sees all registered video capture devices including virtual cameras.
+fn enumerate_directshow_video_devices() -> Result<Vec<CameraInfo>, String> {
+    use windows::Win32::Media::DirectShow::ICreateDevEnum;
+    use windows::Win32::Media::MediaFoundation::{
+        CLSID_SystemDeviceEnum, CLSID_VideoInputDeviceCategory,
+    };
+    use windows::Win32::System::Com::{
+        CoCreateInstance, CoInitializeEx, CoUninitialize, IEnumMoniker, IMoniker,
+        CLSCTX_INPROC_SERVER, COINIT_MULTITHREADED,
+    };
+    use windows::Win32::System::Com::StructuredStorage::IPropertyBag;
+    use windows::core::VARIANT;
+
+    unsafe {
+        let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
+
+        let dev_enum: ICreateDevEnum = CoCreateInstance(
+            &CLSID_SystemDeviceEnum,
+            None,
+            CLSCTX_INPROC_SERVER,
+        )
+        .map_err(|e| format!("CoCreateInstance failed: {e}"))?;
+
+        let mut enum_moniker: Option<IEnumMoniker> = None;
+        dev_enum
+            .CreateClassEnumerator(
+                &CLSID_VideoInputDeviceCategory,
+                &mut enum_moniker,
+                0,
+            )
+            .map_err(|e| format!("CreateClassEnumerator failed: {e}"))?;
+
+        let enum_moniker = match enum_moniker {
+            Some(e) => e,
+            None => {
+                CoUninitialize();
+                return Ok(Vec::new());
+            }
+        };
+
+        let mut devices = Vec::new();
+        let mut moniker_array: [Option<IMoniker>; 1] = [None];
+        let mut fetched = 0u32;
+        let mut index = 0u32;
+
+        loop {
+            let hr = enum_moniker.Next(&mut moniker_array, Some(&mut fetched));
+            if hr.is_err() || fetched == 0 {
+                break;
+            }
+
+            if let Some(ref moniker) = moniker_array[0] {
+                let bag: Result<IPropertyBag, _> = moniker.BindToStorage(None, None);
+                if let Ok(bag) = bag {
+                    let mut var = VARIANT::default();
+                    let prop_name = windows::core::BSTR::from("FriendlyName");
+                    if bag.Read(&prop_name, &mut var, None).is_ok() {
+                        if let Ok(name) = windows::core::BSTR::try_from(&var) {
+                            let name_str = name.to_string();
+                            if !name_str.is_empty() {
+                                devices.push(CameraInfo {
+                                    index,
+                                    name: name_str,
+                                });
+                                index += 1;
+                            }
+                        }
+                    }
+                }
+            }
+
+            moniker_array[0] = None;
+        }
+
+        CoUninitialize();
+        Ok(devices)
     }
 }
 
@@ -413,12 +515,11 @@ async fn open_camera_region_selector(app: tauri::AppHandle, camera_index: u32) -
 fn load_players() -> Result<Vec<String>, String> {
     let path = get_players_path();
     if !path.exists() {
-        // Create the file if missing
         let _ = fs::write(&path, "");
         return Ok(vec![]);
     }
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Failed to read players file: {}", e))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read players file: {}", e))?;
     let names: Vec<String> = content
         .lines()
         .map(|l| l.trim().to_string())
@@ -428,11 +529,17 @@ fn load_players() -> Result<Vec<String>, String> {
 }
 
 #[tauri::command]
-fn save_players(players: Vec<String>) -> Result<CommandResult, String> {
+fn save_players(
+    players: Vec<String>,
+    state: tauri::State<'_, Arc<OcrState>>,
+) -> Result<CommandResult, String> {
     let path = get_players_path();
     let content = players.join("\n");
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write players file: {}", e))?;
+    fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
+    // Update the live matcher
+    if let Ok(mut m) = state.matcher.lock() {
+        m.update_players(players.clone());
+    }
     Ok(CommandResult {
         success: true,
         message: format!("Saved {} player name(s)", players.len()),
@@ -440,10 +547,13 @@ fn save_players(players: Vec<String>) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
-fn add_player(name: String) -> Result<CommandResult, String> {
+fn add_player(
+    name: String,
+    state: tauri::State<'_, Arc<OcrState>>,
+) -> Result<CommandResult, String> {
     let path = get_players_path();
     let mut names = load_players().unwrap_or_default();
-    
+
     let trimmed = name.trim().to_uppercase();
     if trimmed.is_empty() {
         return Ok(CommandResult {
@@ -451,19 +561,23 @@ fn add_player(name: String) -> Result<CommandResult, String> {
             message: "Player name cannot be empty".into(),
         });
     }
-    
+
     if names.iter().any(|n| n.to_uppercase() == trimmed) {
         return Ok(CommandResult {
             success: false,
             message: format!("'{}' already exists", trimmed),
         });
     }
-    
+
     names.push(trimmed.clone());
     let content = names.join("\n");
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write players file: {}", e))?;
-    
+    fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
+
+    // Update live matcher
+    if let Ok(mut m) = state.matcher.lock() {
+        m.update_players(names);
+    }
+
     Ok(CommandResult {
         success: true,
         message: format!("Added '{}'", trimmed),
@@ -471,193 +585,247 @@ fn add_player(name: String) -> Result<CommandResult, String> {
 }
 
 #[tauri::command]
-fn remove_player(name: String) -> Result<CommandResult, String> {
+fn remove_player(
+    name: String,
+    state: tauri::State<'_, Arc<OcrState>>,
+) -> Result<CommandResult, String> {
     let path = get_players_path();
     let mut names = load_players().unwrap_or_default();
-    
+
     let before = names.len();
     names.retain(|n| n.to_uppercase() != name.to_uppercase());
-    
+
     if names.len() == before {
         return Ok(CommandResult {
             success: false,
             message: format!("'{}' not found", name),
         });
     }
-    
+
     let content = names.join("\n");
-    fs::write(&path, content)
-        .map_err(|e| format!("Failed to write players file: {}", e))?;
-    
+    fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
+
+    if let Ok(mut m) = state.matcher.lock() {
+        m.update_players(names);
+    }
+
     Ok(CommandResult {
         success: true,
         message: format!("Removed '{}'", name),
     })
 }
 
-// ── Window Region Selector ───────────────────────────────────────────
-
-#[tauri::command]
-async fn open_window_region_selector(app: tauri::AppHandle, hwnd: i64) -> Result<CommandResult, String> {
-    let data_dir = get_facecam_dir();
-    let script_dir = get_script_dir();
-    let (program, mut args) = get_backend_command();
-    args.push("--region-select".to_string());
-    if hwnd != 0 {
-        args.push("--hwnd".to_string());
-        args.push(hwnd.to_string());
-    }
-
-    let _ = app.emit("log", LogEvent {
-        level: "info".into(),
-        message: "Opening region selector...".into(),
-    });
-
-    let output = Command::new(&program)
-        .args(&args)
-        .current_dir(&script_dir)
-        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
-        .env("PYTHONIOENCODING", "utf-8")
-        .creation_flags(0x00000000)  // Allow window for region selector
-        .output();
-
-    match output {
-        Ok(out) => {
-            if out.status.success() {
-                let _ = app.emit("log", LogEvent {
-                    level: "success".into(),
-                    message: "Region selection complete!".into(),
-                });
-                Ok(CommandResult { success: true, message: "Region saved".into() })
-            } else {
-                let stderr = String::from_utf8_lossy(&out.stderr).to_string();
-                Ok(CommandResult { success: false, message: format!("Selector failed: {}", stderr) })
-            }
-        }
-        Err(e) => Err(format!("Failed to start region selector: {}", e)),
-    }
-}
-
-// ── OCR Capture Commands ─────────────────────────────────────────────
+// ── OCR Commands (native Rust) ──────────────────────────────────────
 
 #[tauri::command]
 async fn start_ocr(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
+    app: AppHandle,
+    state: tauri::State<'_, Arc<OcrState>>,
 ) -> Result<CommandResult, String> {
-    let data_dir = get_facecam_dir();
-    let script_dir = get_script_dir();
-    let (program, prefix_args) = get_backend_command();
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("OCR already running".into());
+    }
 
-    let _ = app.emit("log", LogEvent {
-        level: "info".into(),
-        message: "Starting OCR capture...".into(),
+    let state = state.inner().clone();
+    let app = app.clone();
+
+    tokio::spawn(async move {
+        run_ocr_loop(app, state).await;
     });
 
-    let child = Command::new(&program)
-        .args(&prefix_args)
-        .current_dir(&script_dir)
-        .env("FACECAM_DATA_DIR", data_dir.to_string_lossy().as_ref())
-        .env("PYTHONIOENCODING", "utf-8")
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .creation_flags(0x08000000)
-        .spawn();
+    Ok(CommandResult {
+        success: true,
+        message: "OCR capture started (Rust native)".into(),
+    })
+}
 
-    match child {
-        Ok(mut process) => {
-            {
-                let mut pid = state.ocr_pid.lock().unwrap();
-                *pid = Some(process.id());
-            }
-
-            if let Some(stdout) = process.stdout.take() {
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let reader = BufReader::new(stdout);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            let (level, msg) = parse_log_line(&line);
-                            let _ = app_handle.emit("log", LogEvent { level, message: msg });
-                        }
-                    }
-                });
-            }
-
-            if let Some(stderr) = process.stderr.take() {
-                let app_handle = app.clone();
-                std::thread::spawn(move || {
-                    let reader = BufReader::new(stderr);
-                    for line in reader.lines() {
-                        if let Ok(line) = line {
-                            let _ = app_handle.emit("log", LogEvent {
-                                level: "error".into(),
-                                message: line,
-                            });
-                        }
-                    }
-                });
-            }
-
-            // Wait in background thread
-            let app_handle = app.clone();
-            std::thread::spawn(move || {
-                match process.wait() {
-                    Ok(status) => {
-                        if status.success() {
-                            let _ = app_handle.emit("log", LogEvent {
-                                level: "success".into(),
-                                message: "OCR process completed".into(),
-                            });
-                        }
-                        let _ = app_handle.emit("ocr_stopped", ());
-                    }
-                    Err(e) => {
-                        let _ = app_handle.emit("log", LogEvent {
-                            level: "error".into(),
-                            message: format!("OCR process error: {}", e),
-                        });
-                        let _ = app_handle.emit("ocr_stopped", ());
-                    }
-                }
-            });
-
-            Ok(CommandResult {
-                success: true,
-                message: "OCR capture started".into(),
-            })
-        }
+async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
+    // Load config
+    let config: AppConfig = match load_config() {
+        Ok(c) => c,
         Err(e) => {
-            let _ = app.emit("log", LogEvent {
-                level: "error".into(),
-                message: format!("Failed to start OCR: {}", e),
-            });
-            Err(format!("Failed to start OCR process: {}", e))
+            let _ = app.emit(
+                "log",
+                LogEvent {
+                    level: "error".into(),
+                    message: format!("Failed to load config: {e}"),
+                },
+            );
+            state.running.store(false, Ordering::SeqCst);
+            let _ = app.emit("ocr_stopped", ());
+            return;
         }
+    };
+
+    let capture_interval = config.capture.interval_seconds.max(0.1);
+    let confidence_threshold = config.ocr.confidence_threshold as f32;
+
+    let _ = app.emit(
+        "log",
+        LogEvent {
+            level: "info".into(),
+            message: "OCR engine started (Rust native ONNX)".into(),
+        },
+    );
+
+    let mut ticker = interval(Duration::from_secs_f64(capture_interval));
+
+    while state.running.load(Ordering::SeqCst) {
+        ticker.tick().await;
+
+        // Capture frame based on input source type
+        let region = &config.input_source.window_region;
+        let img_result = if config.input_source.source_type == "window" {
+            let hwnd = config.input_source.window_hwnd as isize;
+            if hwnd == 0 {
+                // No window selected — capture screen region
+                capture::capture_screen_region(
+                    region.left,
+                    region.top,
+                    region.width.max(0) as u32,
+                    region.height.max(0) as u32,
+                )
+            } else {
+                capture::capture_window_region(
+                    hwnd,
+                    region.left,
+                    region.top,
+                    region.width.max(0) as u32,
+                    region.height.max(0) as u32,
+                )
+            }
+        } else {
+            // Camera mode: capture frame from camera, then crop to region
+            let cam_idx = config.input_source.camera_index;
+            capture::capture_camera_frame(cam_idx).and_then(|full| {
+                let rw = region.width.max(0) as u32;
+                let rh = region.height.max(0) as u32;
+                if rw == 0 || rh == 0 {
+                    Ok(full)
+                } else {
+                    let cx = (region.left as u32).min(full.width().saturating_sub(1));
+                    let cy = (region.top as u32).min(full.height().saturating_sub(1));
+                    let cw = rw.min(full.width().saturating_sub(cx)).max(1);
+                    let ch = rh.min(full.height().saturating_sub(cy)).max(1);
+                    Ok(full.crop_imm(cx, cy, cw, ch))
+                }
+            })
+        };
+
+        let img = match img_result {
+            Ok(img) => img,
+            Err(e) => {
+                let _ = app.emit(
+                    "log",
+                    LogEvent {
+                        level: "error".into(),
+                        message: format!("Capture failed: {e}"),
+                    },
+                );
+                continue;
+            }
+        };
+
+        // Encode preview image
+        let preview_b64 = capture::image_to_base64_jpeg(&img).unwrap_or_default();
+
+        // Run OCR (blocking work — run on blocking thread pool)
+        let preprocessed = capture::preprocess_for_ocr(&img);
+        let ocr_results = tokio::task::spawn_blocking(move || ocr::run_ocr(&preprocessed)).await;
+
+        let results = match ocr_results {
+            Ok(Ok(r)) => r,
+            Ok(Err(e)) => {
+                let _ = app.emit(
+                    "log",
+                    LogEvent {
+                        level: "error".into(),
+                        message: format!("OCR failed: {e}"),
+                    },
+                );
+                // Still send preview with no detections
+                send_preview(&app, &preview_b64, &[]);
+                continue;
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "log",
+                    LogEvent {
+                        level: "error".into(),
+                        message: format!("OCR task panicked: {e}"),
+                    },
+                );
+                continue;
+            }
+        };
+
+        // Match results against player names
+        let matcher_guard = state.matcher.lock().unwrap();
+        let mut detections = Vec::new();
+
+        for result in &results {
+            if result.confidence >= confidence_threshold {
+                let matched =
+                    matcher_guard.find_match(&result.text, result.confidence as f64);
+
+                let level = if matched.matched_name.is_some() {
+                    "success"
+                } else {
+                    "info"
+                };
+                let _ = app.emit(
+                    "log",
+                    LogEvent {
+                        level: level.into(),
+                        message: format!(
+                            "\"{}\" → {} (conf: {:.0}%, fuzz: {:.0})",
+                            result.text,
+                            matched
+                                .matched_name
+                                .as_deref()
+                                .unwrap_or("No match"),
+                            result.confidence * 100.0,
+                            matched.match_score
+                        ),
+                    },
+                );
+
+                detections.push(matched);
+            }
+        }
+        drop(matcher_guard);
+
+        // Send preview with detections
+        send_preview(&app, &preview_b64, &detections);
     }
+
+    let _ = app.emit(
+        "log",
+        LogEvent {
+            level: "warning".into(),
+            message: "OCR capture stopped".into(),
+        },
+    );
+    let _ = app.emit("ocr_stopped", ());
+}
+
+fn send_preview(app: &AppHandle, image_b64: &str, detections: &[matcher::MatchResult]) {
+    let preview_json = serde_json::json!({
+        "image": image_b64,
+        "detections": detections
+    });
+    let _ = app.emit(
+        "log",
+        LogEvent {
+            level: "preview".into(),
+            message: preview_json.to_string(),
+        },
+    );
 }
 
 #[tauri::command]
-async fn stop_ocr(
-    app: tauri::AppHandle,
-    state: State<'_, AppState>,
-) -> Result<CommandResult, String> {
-    let pid = {
-        let mut pid_lock = state.ocr_pid.lock().unwrap();
-        pid_lock.take()
-    };
-
-    if let Some(pid) = pid {
-        let _ = Command::new("taskkill")
-            .args(["/PID", &pid.to_string(), "/T", "/F"])
-            .creation_flags(0x08000000)
-            .output();
-
-        let _ = app.emit("log", LogEvent {
-            level: "warning".into(),
-            message: "OCR capture stopped by user".into(),
-        });
-
+async fn stop_ocr(state: tauri::State<'_, Arc<OcrState>>) -> Result<CommandResult, String> {
+    if state.running.swap(false, Ordering::SeqCst) {
         Ok(CommandResult {
             success: true,
             message: "OCR capture stopped".into(),
@@ -671,50 +839,196 @@ async fn stop_ocr(
 }
 
 #[tauri::command]
-fn check_backend() -> Result<CommandResult, String> {
-    let (program, prefix_args) = get_backend_command();
-
-    if prefix_args.is_empty() {
+fn check_backend(app: AppHandle) -> Result<CommandResult, String> {
+    if ocr::is_initialized() {
         return Ok(CommandResult {
             success: true,
-            message: format!("Backend: {} (bundled)", program),
+            message: "Rust native OCR (ONNX Runtime)".into(),
         });
     }
 
-    match Command::new(&program)
-        .arg("--version")
-        .creation_flags(0x08000000)
-        .output()
-    {
-        Ok(output) => {
-            let version = String::from_utf8_lossy(&output.stdout).to_string();
-            Ok(CommandResult {
-                success: true,
-                message: format!("{} (dev mode)", version.trim()),
-            })
+    // OCR not initialized — try to find models and initialize now
+    match find_models_dir(&app) {
+        Some(dir) => {
+            // Try to initialize OCR with the found models
+            match ocr::init_ocr(&dir) {
+                Ok(()) => {
+                    println!("[INFO] OCR models lazy-loaded from: {}", dir.display());
+                    Ok(CommandResult {
+                        success: true,
+                        message: format!("Rust native OCR (ONNX Runtime) — loaded from {}", dir.display()),
+                    })
+                }
+                Err(e) => {
+                    eprintln!("[ERROR] Failed to load OCR models from {}: {e}", dir.display());
+                    Ok(CommandResult {
+                        success: false,
+                        message: format!("Models found at {} but failed to load: {}", dir.display(), e),
+                    })
+                }
+            }
         }
-        Err(_) => Ok(CommandResult {
+        None => Ok(CommandResult {
             success: false,
-            message: "Python not found and no bundled backend available".into(),
+            message: "ONNX models not found. Place det.onnx, rec.onnx, and en_dict.txt in a 'models' directory.".into(),
         }),
     }
 }
 
-// ── Log parser ───────────────────────────────────────────────────────
-fn parse_log_line(line: &str) -> (String, String) {
-    if line.starts_with("[SUCCESS]") {
-        ("success".into(), line.replacen("[SUCCESS] ", "", 1))
-    } else if line.starts_with("[ERROR]") {
-        ("error".into(), line.replacen("[ERROR] ", "", 1))
-    } else if line.starts_with("[WARNING]") || line.starts_with("[WARN]") {
-        ("warning".into(), line.replacen("[WARNING] ", "", 1).replacen("[WARN] ", "", 1))
-    } else if line.starts_with("[PREVIEW]") {
-        ("preview".into(), line.replacen("[PREVIEW] ", "", 1))
-    } else if line.starts_with("[STATUS]") || line.starts_with("[OCR]") || line.starts_with("[Server]") {
-        ("info".into(), line.to_string())
-    } else {
-        ("info".into(), line.to_string())
+// ── Region Selectors ────────────────────────────────────────────────
+
+#[tauri::command]
+async fn open_window_region_selector(
+    app: AppHandle,
+    hwnd: i64,
+    rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
+) -> Result<CommandResult, String> {
+    let _ = app.emit(
+        "log",
+        LogEvent {
+            level: "info".into(),
+            message: format!("Capturing window (HWND {hwnd}) for region selection..."),
+        },
+    );
+
+    // Capture the full window
+    let img = capture::capture_window_region(hwnd as isize, 0, 0, 0, 0)
+        .map_err(|e| format!("Failed to capture window: {e}"))?;
+
+    let b64 = capture::image_to_base64_jpeg(&img)
+        .map_err(|e| format!("Failed to encode image: {e}"))?;
+
+    // Store in state
+    *rs_state.original_width.lock().unwrap() = img.width();
+    *rs_state.original_height.lock().unwrap() = img.height();
+    *rs_state.image_b64.lock().unwrap() = Some(b64);
+    *rs_state.source_type.lock().unwrap() = "window".into();
+    *rs_state.source_hwnd.lock().unwrap() = hwnd;
+
+    // Open the region selector window
+    open_region_selector_window(&app)?;
+
+    Ok(CommandResult {
+        success: true,
+        message: "Region selector opened".into(),
+    })
+}
+
+#[tauri::command]
+async fn open_camera_region_selector(
+    app: AppHandle,
+    _camera_index: u32,
+    rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
+) -> Result<CommandResult, String> {
+    let _ = app.emit(
+        "log",
+        LogEvent {
+            level: "info".into(),
+            message: format!("Capturing frame from camera {} for region selection...", _camera_index),
+        },
+    );
+
+    // Capture a live frame from the selected camera
+    let img = capture::capture_camera_frame(_camera_index)
+        .map_err(|e| format!("Failed to capture camera frame: {e}"))?;
+
+    let b64 = capture::image_to_base64_jpeg(&img)
+        .map_err(|e| format!("Failed to encode image: {e}"))?;
+
+    *rs_state.original_width.lock().unwrap() = img.width();
+    *rs_state.original_height.lock().unwrap() = img.height();
+    *rs_state.image_b64.lock().unwrap() = Some(b64);
+    *rs_state.source_type.lock().unwrap() = "camera".into();
+    *rs_state.source_camera.lock().unwrap() = _camera_index;
+
+    open_region_selector_window(&app)?;
+
+    Ok(CommandResult {
+        success: true,
+        message: "Region selector opened".into(),
+    })
+}
+
+fn open_region_selector_window(app: &AppHandle) -> Result<(), String> {
+    // Close and destroy existing selector window if open
+    if let Some(existing) = app.get_webview_window("region-selector") {
+        let _ = existing.destroy();
     }
+
+    let _win = tauri::WebviewWindowBuilder::new(
+        app,
+        "region-selector",
+        tauri::WebviewUrl::App("region-selector.html".into()),
+    )
+    .title("Select Capture Region")
+    .maximized(true)
+    .decorations(true)
+    .resizable(true)
+    .build()
+    .map_err(|e| format!("Failed to open region selector window: {e}"))?;
+
+    Ok(())
+}
+
+#[tauri::command]
+fn get_region_selector_image(
+    rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
+) -> Result<serde_json::Value, String> {
+    let image = rs_state.image_b64.lock().unwrap();
+    let image = image.as_ref().ok_or("No image available")?;
+    let w = *rs_state.original_width.lock().unwrap();
+    let h = *rs_state.original_height.lock().unwrap();
+
+    Ok(serde_json::json!({
+        "image": image,
+        "original_width": w,
+        "original_height": h,
+    }))
+}
+
+#[tauri::command]
+async fn save_selected_region(
+    app: AppHandle,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
+) -> Result<CommandResult, String> {
+    // Load current config
+    let mut config = load_config()?;
+
+    let source_type = rs_state.source_type.lock().unwrap().clone();
+
+    // Update the region in config
+    config.input_source.window_region = WindowRegion {
+        left,
+        top,
+        width,
+        height,
+    };
+
+    // Save config
+    save_config(config)?;
+
+    let _ = app.emit(
+        "log",
+        LogEvent {
+            level: "success".into(),
+            message: format!(
+                "Region saved: ({}, {}) {}x{} [{}]",
+                left, top, width, height, source_type
+            ),
+        },
+    );
+
+    // Clear stored image to free memory
+    *rs_state.image_b64.lock().unwrap() = None;
+
+    Ok(CommandResult {
+        success: true,
+        message: format!("Region saved: ({}, {}) {}x{}", left, top, width, height),
+    })
 }
 
 // ── App entry ────────────────────────────────────────────────────────
@@ -722,10 +1036,55 @@ fn parse_log_line(line: &str) -> (String, String) {
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
-        .plugin(tauri_plugin_shell::init())
         .plugin(tauri_plugin_fs::init())
-        .manage(AppState {
-            ocr_pid: Mutex::new(None),
+        .setup(|app| {
+            // Initialize ONNX models
+            let models_initialized = if let Some(models_dir) = find_models_dir(app.handle()) {
+                match ocr::init_ocr(&models_dir) {
+                    Ok(()) => {
+                        println!("[INFO] OCR models loaded from: {}", models_dir.display());
+                        true
+                    }
+                    Err(e) => {
+                        eprintln!("[WARN] Failed to load OCR models: {e}");
+                        false
+                    }
+                }
+            } else {
+                eprintln!("[WARN] ONNX models directory not found. OCR will not be available until models are placed.");
+                false
+            };
+
+            // Load player names
+            let players: Vec<String> = load_players()
+                .unwrap_or_default();
+
+            let threshold = match load_config() {
+                Ok(c) => c.ocr.fuzzy_match_threshold as f64,
+                Err(_) => 70.0,
+            };
+
+            app.manage(Arc::new(OcrState {
+                running: AtomicBool::new(false),
+                matcher: Mutex::new(matcher::FuzzyMatcher::new(players, threshold)),
+            }));
+
+            app.manage(Arc::new(RegionSelectorState {
+                image_b64: Mutex::new(None),
+                original_width: Mutex::new(0),
+                original_height: Mutex::new(0),
+                source_type: Mutex::new("window".into()),
+                source_hwnd: Mutex::new(0),
+                source_camera: Mutex::new(0),
+            }));
+
+            if models_initialized {
+                println!("[INFO] Efinity FaceCam ready — Rust native OCR active");
+            } else {
+                println!("[INFO] Efinity FaceCam ready — OCR models not loaded (check 'models' directory)");
+            }
+
+            Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             load_config,
@@ -741,6 +1100,8 @@ pub fn run() {
             start_ocr,
             stop_ocr,
             check_backend,
+            get_region_selector_image,
+            save_selected_region,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

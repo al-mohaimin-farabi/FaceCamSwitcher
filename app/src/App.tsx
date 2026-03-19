@@ -24,8 +24,9 @@ function App() {
           dispatch(incrementScans());
           if (data.detections && data.detections.length > 0) {
             dispatch(incrementDetections(data.detections.length));
-            if (data.detections.some((d) => d.matched_name)) {
-              dispatch(incrementMatches());
+            const matchCount = data.detections.filter((d) => d.matched_name).length;
+            if (matchCount > 0) {
+              dispatch(incrementMatches(matchCount));
             }
           }
         } catch {}

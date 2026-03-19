@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
 import LogViewer from "../components/LogViewer";
 import { useSelector, useDispatch } from "react-redux";
@@ -18,6 +18,7 @@ import {
   RefreshCw,
   Target,
   Video,
+  RotateCcw,
 } from "lucide-react";
 
 interface WindowInfo {
@@ -148,20 +149,40 @@ export default function Dashboard() {
     }
   };
 
-  const updateConfigValue = async (path: string, value: any) => {
+  // Debounced config save — waits 500ms after last keystroke before doing IPC
+  const saveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  const updateConfigValue = useCallback((path: string, value: any) => {
     if (!config) return;
+    // Optimistically update Redux immediately (UI feels instant)
+    dispatch(updateConfigField({ path, value }));
+    // Debounce the actual disk save
+    if (saveTimerRef.current) clearTimeout(saveTimerRef.current);
+    saveTimerRef.current = setTimeout(async () => {
+      try {
+        const cfg = await invoke<any>("load_config");
+        const parts = path.split(".");
+        let obj: any = cfg;
+        for (let i = 0; i < parts.length - 1; i++) {
+          obj = obj[parts[i]];
+        }
+        obj[parts[parts.length - 1]] = value;
+        await invoke("save_config", { config: cfg });
+      } catch (e) {
+        dispatch(addLog({ time: now(), level: "error", message: `Failed to update config: ${e}` }));
+      }
+    }, 500);
+  }, [config, dispatch]);
+
+  const handleResetRegion = async () => {
+    const blank = { left: 0, top: 0, width: 0, height: 0 };
     try {
       const cfg = await invoke<any>("load_config");
-      const parts = path.split(".");
-      let obj: any = cfg;
-      for (let i = 0; i < parts.length - 1; i++) {
-        obj = obj[parts[i]];
-      }
-      obj[parts[parts.length - 1]] = value;
+      cfg.input_source.window_region = blank;
       await invoke("save_config", { config: cfg });
       await loadConfig();
     } catch (e) {
-      dispatch(addLog({ time: now(), level: "error", message: `Failed to update config: ${e}` }));
+      dispatch(addLog({ time: now(), level: "error", message: `Failed to reset region: ${e}` }));
     }
   };
 
@@ -171,8 +192,20 @@ export default function Dashboard() {
     dispatch(updateConfigField({ path: "input_source.window_title", value: title }));
     try {
       const cfg = await invoke<any>("load_config");
-      cfg.input_source = { ...cfg.input_source, type: "window", window_hwnd: hwnd, window_title: title };
+      // Auto-restore saved region for this window title if one exists
+      const savedRegion = cfg.saved_regions?.[title];
+      cfg.input_source = {
+        ...cfg.input_source,
+        type: "window",
+        window_hwnd: hwnd,
+        window_title: title,
+        ...(savedRegion ? { window_region: savedRegion } : {}),
+      };
       await invoke("save_config", { config: cfg });
+      await loadConfig();
+      if (savedRegion) {
+        dispatch(addLog({ time: now(), level: "success", message: `Auto-restored saved region for "${title}"` }));
+      }
     } catch (e) {
       dispatch(addLog({ time: now(), level: "error", message: `Failed to save window: ${e}` }));
     }
@@ -183,8 +216,19 @@ export default function Dashboard() {
     dispatch(updateConfigField({ path: "input_source.camera_index", value: cameraIndex }));
     try {
       const cfg = await invoke<any>("load_config");
-      cfg.input_source = { ...cfg.input_source, type: "camera", camera_index: cameraIndex };
+      const cameraKey = `__camera_${cameraIndex}__`;
+      const savedRegion = cfg.saved_regions?.[cameraKey];
+      cfg.input_source = {
+        ...cfg.input_source,
+        type: "camera",
+        camera_index: cameraIndex,
+        ...(savedRegion ? { window_region: savedRegion } : {}),
+      };
       await invoke("save_config", { config: cfg });
+      await loadConfig();
+      if (savedRegion) {
+        dispatch(addLog({ time: now(), level: "success", message: `Auto-restored saved region for camera ${cameraIndex}` }));
+      }
     } catch (e) {
       dispatch(addLog({ time: now(), level: "error", message: `Failed to save camera: ${e}` }));
     }
@@ -340,18 +384,28 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <button
-                  className="btn btn-accent"
-                  style={{ width: "100%", height: 34, borderRadius: 8, fontSize: 12, marginTop: 4 }}
-                  onClick={handleSelectWindowRegion}
-                  disabled={isSelectingRegion || !(src?.window_hwnd)}
-                >
-                  {isSelectingRegion ? (
-                    <RefreshCw size={13} className="animate-spin" />
-                  ) : (
-                    <><Target size={13} /> Select Region in Window</>
-                  )}
-                </button>
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  <button
+                    className="btn btn-accent"
+                    style={{ flex: 1, height: 34, borderRadius: 8, fontSize: 12 }}
+                    onClick={handleSelectWindowRegion}
+                    disabled={isSelectingRegion || !(src?.window_hwnd)}
+                  >
+                    {isSelectingRegion ? (
+                      <RefreshCw size={13} className="animate-spin" />
+                    ) : (
+                      <><Target size={13} /> Select Region</>
+                    )}
+                  </button>
+                  <button
+                    className="btn"
+                    title="Reset region (capture full window)"
+                    style={{ height: 34, padding: "0 10px", borderRadius: 8, background: "var(--bg-input)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center" }}
+                    onClick={handleResetRegion}
+                  >
+                    <RotateCcw size={13} />
+                  </button>
+                </div>
               </>
             ) : (
               /* ── Virtual Camera mode ── */
@@ -416,34 +470,43 @@ export default function Dashboard() {
                   </div>
                 </div>
 
-                <button
-                  className="btn"
-                  style={{
-                    width: "100%",
-                    height: 34,
-                    borderRadius: 8,
-                    fontSize: 12,
-                    marginTop: 4,
-                    background: "var(--cyan)",
-                    color: "#fff",
-                    border: "none",
-                    cursor: cameraList.length === 0 || isSelectingRegion ? "not-allowed" : "pointer",
-                    opacity: cameraList.length === 0 || isSelectingRegion ? 0.5 : 1,
-                    display: "flex",
-                    alignItems: "center",
-                    justifyContent: "center",
-                    gap: 6,
-                    fontWeight: 600,
-                  }}
-                  onClick={handleSelectCameraRegion}
-                  disabled={isSelectingRegion || cameraList.length === 0}
-                >
-                  {isSelectingRegion ? (
-                    <RefreshCw size={13} className="animate-spin" />
-                  ) : (
-                    <><Target size={13} /> Select Region from Camera</>
-                  )}
-                </button>
+                <div style={{ display: "flex", gap: 6, marginTop: 4 }}>
+                  <button
+                    className="btn"
+                    style={{
+                      flex: 1,
+                      height: 34,
+                      borderRadius: 8,
+                      fontSize: 12,
+                      background: "var(--cyan)",
+                      color: "#fff",
+                      border: "none",
+                      cursor: cameraList.length === 0 || isSelectingRegion ? "not-allowed" : "pointer",
+                      opacity: cameraList.length === 0 || isSelectingRegion ? 0.5 : 1,
+                      display: "flex",
+                      alignItems: "center",
+                      justifyContent: "center",
+                      gap: 6,
+                      fontWeight: 600,
+                    }}
+                    onClick={handleSelectCameraRegion}
+                    disabled={isSelectingRegion || cameraList.length === 0}
+                  >
+                    {isSelectingRegion ? (
+                      <RefreshCw size={13} className="animate-spin" />
+                    ) : (
+                      <><Target size={13} /> Select Region</>
+                    )}
+                  </button>
+                  <button
+                    className="btn"
+                    title="Reset region (capture full camera)"
+                    style={{ height: 34, padding: "0 10px", borderRadius: 8, background: "var(--bg-input)", border: "1px solid var(--border)", color: "var(--text-muted)", cursor: "pointer", flexShrink: 0, display: "flex", alignItems: "center" }}
+                    onClick={handleResetRegion}
+                  >
+                    <RotateCcw size={13} />
+                  </button>
+                </div>
               </>
             )}
           </div>
@@ -459,9 +522,12 @@ export default function Dashboard() {
             style={{ width: "100%", height: 48, fontSize: 14, fontWeight: 700 }}
             onClick={handleStartStop}
             disabled={!canStart}
+            title={!backendOk ? "Backend is unavailable — check that FaceCam_Backend.exe exists" : !canStart ? "Select a camera first" : ""}
           >
             {isRunning ? (
               <><Square size={16} fill="currentColor" /> Stop Capture</>
+            ) : !backendOk ? (
+              <><Play size={16} fill="currentColor" /> Backend Unavailable</>
             ) : (
               <><Play size={16} fill="currentColor" /> Start Capture</>
             )}

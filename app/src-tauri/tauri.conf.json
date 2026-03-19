@@ -7,10 +7,11 @@
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
     "beforeDevCommand": "npm run dev",
-    "beforeBuildCommand": "node clean_builds.js && npm run build:all",
+    "beforeBuildCommand": "node clean_builds.js && npm run build",
     "beforeBundleCommand": "node post_build.js"
   },
   "app": {
+    "withGlobalTauri": true,
     "windows": [
       {
         "title": "Efinity FaceCam",
@@ -31,6 +32,7 @@
   "bundle": {
     "active": true,
     "targets": "nsis",
+    "resources": ["models/"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",

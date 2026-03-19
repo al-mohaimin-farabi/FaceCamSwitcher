@@ -16,6 +16,28 @@ const filesToCopy = [
     }
 ];
 
+// Directories to copy to the project root
+const dirsToCopy = [
+    {
+        source: path.join(__dirname, 'src-tauri', 'models'),
+        target: path.join(rootDir, 'models'),
+        label: 'ONNX models',
+    }
+];
+
+function copyDirSync(src, dest) {
+    fs.mkdirSync(dest, { recursive: true });
+    for (const entry of fs.readdirSync(src, { withFileTypes: true })) {
+        const srcPath = path.join(src, entry.name);
+        const destPath = path.join(dest, entry.name);
+        if (entry.isDirectory()) {
+            copyDirSync(srcPath, destPath);
+        } else {
+            fs.copyFileSync(srcPath, destPath);
+        }
+    }
+}
+
 console.log('[POST-BUILD] Starting copy process...');
 
 for (const file of filesToCopy) {
@@ -29,6 +51,20 @@ for (const file of filesToCopy) {
         }
     } catch (e) {
         console.error(`[POST-BUILD] ✗ Failed to copy ${file.label}:`, e.message);
+    }
+}
+
+for (const dir of dirsToCopy) {
+    try {
+        if (fs.existsSync(dir.source)) {
+            copyDirSync(dir.source, dir.target);
+            const fileCount = fs.readdirSync(dir.target).length;
+            console.log(`[POST-BUILD] ✓ Copied ${dir.label} (${fileCount} files)`);
+        } else {
+            console.warn(`[POST-BUILD] ⚠ ${dir.label} not found at: ${dir.source}`);
+        }
+    } catch (e) {
+        console.error(`[POST-BUILD] ✗ Failed to copy ${dir.label}:`, e.message);
     }
 }
 

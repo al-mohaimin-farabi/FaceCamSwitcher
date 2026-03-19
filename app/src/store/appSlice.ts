@@ -18,6 +18,7 @@ export interface CameraInfo {
 
 
 export interface AppConfig {
+  saved_regions: Record<string, { left: number; top: number; width: number; height: number }>;
   input_source: {
     type: "window" | "camera";
     window_hwnd: number;
@@ -130,8 +131,8 @@ export const appSlice = createSlice({
     incrementDetections: (state, action: PayloadAction<number>) => {
       state.stats.detections += action.payload;
     },
-    incrementMatches: (state) => {
-      state.stats.matches += 1;
+    incrementMatches: (state, action: PayloadAction<number>) => {
+      state.stats.matches += action.payload;
     },
     setPreviewData: (state, action: PayloadAction<PreviewData | null>) => {
       state.previewData = action.payload;

@@ -2,11 +2,10 @@
   "$schema": "../gen/schemas/desktop-schema.json",
   "identifier": "default",
   "description": "FaceCam default capabilities",
-  "windows": ["main"],
+  "windows": ["main", "region-selector"],
   "permissions": [
     "core:default",
-    "shell:allow-open",
-    "shell:allow-execute",
-    "fs:default"
+    "fs:default",
+    "core:window:allow-close"
   ]
 }
