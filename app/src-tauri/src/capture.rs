@@ -86,40 +86,57 @@ pub fn image_to_base64_jpeg(img: &DynamicImage) -> Result<String, String> {
 }
 
 /// Capture a single frame from a camera device by DirectShow index.
-/// Finds the matching MF device by name, then captures via MF source reader.
-pub fn capture_camera_frame(ds_index: u32) -> Result<DynamicImage, String> {
-    // Get the device name from DirectShow at the given index
-    let ds_name = get_ds_device_name(ds_index);
+pub fn capture_camera_frame(camera_index: u32) -> Result<DynamicImage, String> {
+    let mut errors: Vec<String> = Vec::new();
 
-    // Find the matching MF index by name
-    if let Some(name) = &ds_name {
-        if let Some(mf_index) = find_mf_index_by_name(name) {
-            println!("[CAMERA] DS index {} ('{}') -> MF index {}", ds_index, name, mf_index);
-            match capture_camera_frame_mf(mf_index) {
+    // 1. Try MF name-matched from DS index
+    let ds_name = get_ds_device_name(camera_index);
+    if let Some(ref name) = ds_name {
+        eprintln!("[CAMERA] DS index {} = '{}'", camera_index, name);
+        if let Some(mf_idx) = find_mf_index_by_name(name) {
+            eprintln!("[CAMERA] Matched MF index {}", mf_idx);
+            match capture_camera_frame_mf(mf_idx) {
                 Ok(img) => return Ok(img),
                 Err(e) => {
-                    eprintln!("[CAMERA] MF capture failed for '{}' (MF index {}): {e}", name, mf_index);
+                    eprintln!("[CAMERA] MF name-matched failed: {}", e);
+                    errors.push(format!("MF(name={}): {}", mf_idx, e));
                 }
             }
+        } else {
+            errors.push(format!("MF: device '{}' not found in MF", name));
+        }
+    } else {
+        errors.push(format!("DS: no device at index {}", camera_index));
+    }
+
+    // 2. Try MF with same index
+    match capture_camera_frame_mf(camera_index) {
+        Ok(img) => return Ok(img),
+        Err(e) => {
+            eprintln!("[CAMERA] MF direct #{} failed: {}", camera_index, e);
+            errors.push(format!("MF(idx={}): {}", camera_index, e));
         }
     }
 
-    // Try MF with the same index directly (might work if order matches)
-    match capture_camera_frame_mf(ds_index) {
+    // 3. Try pure DirectShow capture
+    match capture_camera_frame_dshow(camera_index) {
         Ok(img) => return Ok(img),
         Err(e) => {
-            eprintln!("[CAMERA] MF direct index {} failed: {e}, trying nokhwa...", ds_index);
+            eprintln!("[CAMERA] DS capture #{} failed: {}", camera_index, e);
+            errors.push(format!("DS: {}", e));
         }
     }
 
-    // Fallback: nokhwa
-    match capture_camera_frame_nokhwa(ds_index) {
+    // 4. Last resort: nokhwa
+    match capture_camera_frame_nokhwa(camera_index) {
         Ok(img) => return Ok(img),
         Err(e) => {
-            eprintln!("[CAMERA] nokhwa also failed for index {ds_index}: {e}");
-            Err(format!("Could not capture from camera {ds_index}. Make sure the camera is not in use by another application."))
+            eprintln!("[CAMERA] nokhwa #{} failed: {}", camera_index, e);
+            errors.push(format!("nokhwa: {}", e));
         }
     }
+
+    Err(format!("All capture methods failed for camera {}:\n{}", camera_index, errors.join("\n")))
 }
 
 /// Get the friendly name of a DirectShow device by index.
@@ -134,31 +151,25 @@ fn get_ds_device_name(ds_index: u32) -> Option<String> {
 
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
-
         let dev_enum: ICreateDevEnum = CoCreateInstance(
             &CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER,
         ).ok()?;
-
         let mut enum_moniker: Option<IEnumMoniker> = None;
         dev_enum.CreateClassEnumerator(
             &CLSID_VideoInputDeviceCategory, &mut enum_moniker, 0,
         ).ok()?;
-
         let enum_moniker = enum_moniker?;
         let mut moniker_arr: [Option<IMoniker>; 1] = [None];
         let mut fetched = 0u32;
-
         for _ in 0..ds_index {
             if enum_moniker.Next(&mut moniker_arr, Some(&mut fetched)).is_err() || fetched == 0 {
                 return None;
             }
             moniker_arr[0] = None;
         }
-
         if enum_moniker.Next(&mut moniker_arr, Some(&mut fetched)).is_err() || fetched == 0 {
             return None;
         }
-
         let moniker = moniker_arr[0].as_ref()?;
         let bag: IPropertyBag = moniker.BindToStorage(None, None).ok()?;
         let mut var = VARIANT::default();
@@ -172,55 +183,432 @@ fn get_ds_device_name(ds_index: u32) -> Option<String> {
 fn find_mf_index_by_name(target_name: &str) -> Option<u32> {
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::*;
-
     unsafe {
         let _ = CoInitializeEx(None, COINIT_MULTITHREADED);
         MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET).ok()?;
-
         let mut attributes: Option<IMFAttributes> = None;
         MFCreateAttributes(&mut attributes, 1).ok()?;
         let attributes = attributes?;
-
         attributes.SetGUID(
             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE,
             &MF_DEVSOURCE_ATTRIBUTE_SOURCE_TYPE_VIDCAP_GUID,
         ).ok()?;
-
         let mut devices_ptr: *mut Option<IMFActivate> = std::ptr::null_mut();
         let mut count: u32 = 0;
         MFEnumDeviceSources(&attributes, &mut devices_ptr, &mut count).ok()?;
-
         if count == 0 || devices_ptr.is_null() {
             MFShutdown().ok();
             return None;
         }
-
         let devices = std::slice::from_raw_parts(devices_ptr, count as usize);
         let target_lower = target_name.to_lowercase();
         let mut found = None;
-
+        let mut best_score = 0usize;
         for i in 0..count {
             if let Some(ref activate) = devices[i as usize] {
                 let mut name_ptr = windows::core::PWSTR::null();
                 let mut name_len = 0u32;
                 if activate.GetAllocatedString(
                     &MF_DEVSOURCE_ATTRIBUTE_FRIENDLY_NAME,
-                    &mut name_ptr,
-                    &mut name_len,
+                    &mut name_ptr, &mut name_len,
                 ).is_ok() {
                     if let Ok(name) = name_ptr.to_string() {
-                        if name.to_lowercase() == target_lower {
+                        let mf_lower = name.to_lowercase();
+                        eprintln!("[CAMERA] MF device {}: '{}'", i, name);
+
+                        // Exact match
+                        if mf_lower == target_lower {
                             found = Some(i);
+                            best_score = usize::MAX;
+                        } else if best_score < usize::MAX {
+                            // Fuzzy: check if one contains the other
+                            if mf_lower.contains(&target_lower) || target_lower.contains(&mf_lower) {
+                                let score = target_lower.len().min(mf_lower.len());
+                                if score > best_score {
+                                    best_score = score;
+                                    found = Some(i);
+                                }
+                            }
                         }
                     }
                     CoTaskMemFree(Some(name_ptr.as_ptr() as *const _));
                 }
             }
         }
-
         CoTaskMemFree(Some(devices_ptr as *const _));
         MFShutdown().ok();
         found
+    }
+}
+
+// ── Pure DirectShow capture (for virtual cameras) ────────────────────
+
+// GUIDs not in the windows crate (from qedit.h / strmif.h)
+const CLSID_FILTER_GRAPH: windows::core::GUID =
+    windows::core::GUID::from_u128(0xe436ebb3_524f_11ce_9f53_0020af0ba770);
+const CLSID_SAMPLE_GRABBER: windows::core::GUID =
+    windows::core::GUID::from_u128(0xc1f400a0_3f08_11d3_9f0b_006008039e37);
+const CLSID_NULL_RENDERER: windows::core::GUID =
+    windows::core::GUID::from_u128(0xc1f400a4_3f08_11d3_9f0b_006008039e37);
+const CLSID_CAPTURE_GRAPH_BUILDER2: windows::core::GUID =
+    windows::core::GUID::from_u128(0xbf87b6e1_8c27_11d0_b3f0_00aa003761c5);
+const PIN_CATEGORY_CAPTURE_GUID: windows::core::GUID =
+    windows::core::GUID::from_u128(0xfb6c4281_0353_11d1_905f_0000c0cc16ba);
+const MEDIATYPE_VIDEO_GUID: windows::core::GUID =
+    windows::core::GUID::from_u128(0x73646976_0000_0010_8000_00aa00389b71);
+const MEDIASUBTYPE_RGB24_GUID: windows::core::GUID =
+    windows::core::GUID::from_u128(0xe436eb7d_524f_11ce_9f53_0020af0ba770);
+
+// ISampleGrabber COM interface (from qedit.h)
+// IID: {6B652FFF-11FE-4fce-92AD-0266B5D7C78F}
+#[repr(C)]
+struct SampleGrabberVtbl {
+    // IUnknown
+    query_interface: usize,
+    add_ref: usize,
+    release: usize,
+    // ISampleGrabber
+    set_one_shot: unsafe extern "system" fn(*mut core::ffi::c_void, i32) -> i32,
+    set_media_type: unsafe extern "system" fn(*mut core::ffi::c_void, *const DsMediaType) -> i32,
+    get_connected_media_type: unsafe extern "system" fn(*mut core::ffi::c_void, *mut DsMediaType) -> i32,
+    set_buffer_samples: unsafe extern "system" fn(*mut core::ffi::c_void, i32) -> i32,
+    get_current_buffer: unsafe extern "system" fn(*mut core::ffi::c_void, *mut i32, *mut u8) -> i32,
+    get_current_sample: usize,
+    set_callback: usize,
+}
+
+#[repr(C)]
+#[derive(Default, Clone)]
+struct DsMediaType {
+    majortype: windows::core::GUID,
+    subtype: windows::core::GUID,
+    fixed_size_samples: i32,
+    temporal_compression: i32,
+    sample_size: u32,
+    format_type: windows::core::GUID,
+    unk: usize,
+    cb_format: u32,
+    pb_format: *mut u8,
+}
+
+#[repr(C)]
+#[allow(dead_code)]
+struct VideoInfoHeader {
+    rc_source: [i32; 4],
+    rc_target: [i32; 4],
+    bit_rate: u32,
+    bit_error_rate: u32,
+    avg_time_per_frame: i64,
+    bmi_header: BitmapInfoHeader,
+}
+
+#[repr(C)]
+#[allow(dead_code)]
+struct BitmapInfoHeader {
+    size: u32,
+    width: i32,
+    height: i32,
+    planes: u16,
+    bit_count: u16,
+    compression: u32,
+    size_image: u32,
+    x_pels_per_meter: i32,
+    y_pels_per_meter: i32,
+    clr_used: u32,
+    clr_important: u32,
+}
+
+/// Capture a frame using pure DirectShow filter graph.
+/// Runs in a dedicated STA thread with message pump (required for DS).
+fn capture_camera_frame_dshow(ds_index: u32) -> Result<DynamicImage, String> {
+    // DirectShow requires STA + message pump, so run in a dedicated thread
+    let (tx, rx) = std::sync::mpsc::channel();
+    let handle = std::thread::spawn(move || {
+        let result = capture_camera_frame_dshow_inner(ds_index);
+        let _ = tx.send(result);
+    });
+    let result = rx.recv().map_err(|e| format!("DS: thread recv failed: {e}"))?;
+    let _ = handle.join();
+    result
+}
+
+fn capture_camera_frame_dshow_inner(ds_index: u32) -> Result<DynamicImage, String> {
+    use windows::Win32::Media::DirectShow::*;
+    use windows::Win32::Media::MediaFoundation::{
+        CLSID_SystemDeviceEnum, CLSID_VideoInputDeviceCategory,
+    };
+    use windows::Win32::System::Com::*;
+    use windows::core::Interface;
+
+    unsafe {
+        CoInitializeEx(None, COINIT_APARTMENTTHREADED)
+            .ok().map_err(|e| format!("DS: CoInitialize failed: {e}"))?;
+
+        let iid_sample_grabber = windows::core::GUID::from_u128(
+            0x6b652fff_11fe_4fce_92ad_0266b5d7c78f
+        );
+
+        // Get moniker for the device
+        let dev_enum: ICreateDevEnum = CoCreateInstance(
+            &CLSID_SystemDeviceEnum, None, CLSCTX_INPROC_SERVER,
+        ).map_err(|e| format!("DS: CoCreateInstance failed: {e}"))?;
+
+        let mut enum_moniker: Option<IEnumMoniker> = None;
+        dev_enum.CreateClassEnumerator(
+            &CLSID_VideoInputDeviceCategory, &mut enum_moniker, 0,
+        ).map_err(|e| format!("DS: CreateClassEnumerator failed: {e}"))?;
+        let enum_moniker = enum_moniker.ok_or("DS: No video devices")?;
+
+        let mut moniker_arr: [Option<IMoniker>; 1] = [None];
+        let mut fetched = 0u32;
+        for _ in 0..ds_index {
+            if enum_moniker.Next(&mut moniker_arr, Some(&mut fetched)).is_err() || fetched == 0 {
+                return Err(format!("DS: Camera index {} not found", ds_index));
+            }
+            moniker_arr[0] = None;
+        }
+        if enum_moniker.Next(&mut moniker_arr, Some(&mut fetched)).is_err() || fetched == 0 {
+            return Err(format!("DS: Camera index {} not found", ds_index));
+        }
+        let moniker = moniker_arr[0].take().ok_or("DS: No moniker")?;
+
+        // Create filter graph
+        let graph: IGraphBuilder = CoCreateInstance(
+            &CLSID_FILTER_GRAPH, None, CLSCTX_INPROC_SERVER,
+        ).map_err(|e| format!("DS: FilterGraph failed: {e}"))?;
+
+        let capture_filter: IBaseFilter = moniker.BindToObject(None, None)
+            .map_err(|e| format!("DS: BindToObject failed: {e}"))?;
+        graph.AddFilter(&capture_filter, windows::core::w!("Capture"))
+            .map_err(|e| format!("DS: AddFilter capture failed: {e}"))?;
+
+        // Create SampleGrabber and get raw ISampleGrabber vtable
+        let grabber_filter: IBaseFilter = CoCreateInstance(
+            &CLSID_SAMPLE_GRABBER, None, CLSCTX_INPROC_SERVER,
+        ).map_err(|e| format!("DS: SampleGrabber create failed: {e}"))?;
+
+        let mut grabber_ptr: *mut core::ffi::c_void = std::ptr::null_mut();
+        let _ = (grabber_filter.vtable().base__.base__.base__.QueryInterface)(
+            grabber_filter.as_raw(), &iid_sample_grabber, &mut grabber_ptr,
+        );
+        if grabber_ptr.is_null() {
+            return Err("DS: QueryInterface ISampleGrabber failed".into());
+        }
+        let vt = *(grabber_ptr as *const *const usize);
+
+        type SetI32Fn = unsafe extern "system" fn(*mut core::ffi::c_void, i32) -> i32;
+        type SetMtFn = unsafe extern "system" fn(*mut core::ffi::c_void, *const DsMediaType) -> i32;
+        type GetMtFn = unsafe extern "system" fn(*mut core::ffi::c_void, *mut DsMediaType) -> i32;
+        type GetBufFn = unsafe extern "system" fn(*mut core::ffi::c_void, *mut i32, *mut u8) -> i32;
+
+        let set_media_type: SetMtFn = std::mem::transmute(*vt.add(4));
+        let get_connected_media_type: GetMtFn = std::mem::transmute(*vt.add(5));
+        let set_buffer_samples: SetI32Fn = std::mem::transmute(*vt.add(6));
+        let get_current_buffer: GetBufFn = std::mem::transmute(*vt.add(7));
+
+        // Accept any video format — we handle conversion below
+        let mut mt = DsMediaType::default();
+        mt.majortype = MEDIATYPE_VIDEO_GUID;
+        set_media_type(grabber_ptr, &mt);
+
+        // Enable continuous buffering (no one-shot — avoids VFW_E_WRONG_STATE)
+        set_buffer_samples(grabber_ptr, 1);
+
+        graph.AddFilter(&grabber_filter, windows::core::w!("Grabber"))
+            .map_err(|e| format!("DS: AddFilter grabber failed: {e}"))?;
+
+        let null_renderer: IBaseFilter = CoCreateInstance(
+            &CLSID_NULL_RENDERER, None, CLSCTX_INPROC_SERVER,
+        ).map_err(|e| format!("DS: NullRenderer failed: {e}"))?;
+        graph.AddFilter(&null_renderer, windows::core::w!("Null"))
+            .map_err(|e| format!("DS: AddFilter null failed: {e}"))?;
+
+        // Build graph
+        let builder: ICaptureGraphBuilder2 = CoCreateInstance(
+            &CLSID_CAPTURE_GRAPH_BUILDER2, None, CLSCTX_INPROC_SERVER,
+        ).map_err(|e| format!("DS: CaptureGraphBuilder2 failed: {e}"))?;
+        builder.SetFiltergraph(&graph)
+            .map_err(|e| format!("DS: SetFiltergraph failed: {e}"))?;
+        builder.RenderStream(
+            Some(&PIN_CATEGORY_CAPTURE_GUID),
+            &MEDIATYPE_VIDEO_GUID,
+            &capture_filter,
+            Some(&grabber_filter),
+            Some(&null_renderer),
+        ).map_err(|e| format!("DS: RenderStream failed: {e}"))?;
+
+        // Run graph
+        let control: IMediaControl = graph.cast()
+            .map_err(|e| format!("DS: IMediaControl cast failed: {e}"))?;
+        control.Run().map_err(|e| format!("DS: Run failed: {e}"))?;
+
+        // Poll for a non-blank frame with STA message pump
+        // Virtual cameras (OBS, vMix) need extra time to deliver real frames
+        let start = std::time::Instant::now();
+        let mut buf_size: i32 = 0;
+        let mut buffer: Vec<u8> = Vec::new();
+        let mut got_real_frame = false;
+
+        loop {
+            // Pump COM/window messages (required for STA DirectShow)
+            let mut msg = std::mem::zeroed::<windows::Win32::UI::WindowsAndMessaging::MSG>();
+            while windows::Win32::UI::WindowsAndMessaging::PeekMessageW(
+                &mut msg, None, 0, 0,
+                windows::Win32::UI::WindowsAndMessaging::PM_REMOVE,
+            ).as_bool() {
+                let _ = windows::Win32::UI::WindowsAndMessaging::TranslateMessage(&msg);
+                windows::Win32::UI::WindowsAndMessaging::DispatchMessageW(&msg);
+            }
+
+            buf_size = 0;
+            let hr = get_current_buffer(grabber_ptr, &mut buf_size, std::ptr::null_mut());
+            if hr >= 0 && buf_size > 0 {
+                // Read the actual buffer
+                buffer.resize(buf_size as usize, 0);
+                let hr2 = get_current_buffer(grabber_ptr, &mut buf_size, buffer.as_mut_ptr());
+                if hr2 >= 0 {
+                    // Check if frame has real content (not all same value)
+                    let sample_step = (buffer.len() / 200).max(1);
+                    let first = buffer[0];
+                    let is_uniform = buffer.iter().step_by(sample_step).all(|&b| b == first);
+                    if !is_uniform {
+                        got_real_frame = true;
+                        break;
+                    }
+                    // Frame is uniform/blank — keep waiting for a real one
+                    if start.elapsed() > std::time::Duration::from_secs(3) {
+                        // After 3s, accept whatever we have
+                        got_real_frame = true;
+                        break;
+                    }
+                }
+            }
+
+            if start.elapsed() > std::time::Duration::from_secs(5) {
+                let _ = control.Stop();
+                CoUninitialize();
+                return Err(format!("DS: Timeout waiting for frame (hr=0x{:08x})", hr as u32));
+            }
+            std::thread::sleep(std::time::Duration::from_millis(30));
+        }
+
+        if !got_real_frame || buffer.is_empty() {
+            let _ = control.Stop();
+            CoUninitialize();
+            return Err("DS: No frame data received".into());
+        }
+
+        // Get connected media type for dimensions and pixel format
+        let mut connected_mt = DsMediaType::default();
+        let hr = get_connected_media_type(grabber_ptr, &mut connected_mt);
+        let _ = control.Stop();
+
+        if hr < 0 || connected_mt.pb_format.is_null() || connected_mt.cb_format < std::mem::size_of::<VideoInfoHeader>() as u32 {
+            CoUninitialize();
+            return Err("DS: Could not determine video dimensions".into());
+        }
+
+        let vih = &*(connected_mt.pb_format as *const VideoInfoHeader);
+        let width = vih.bmi_header.width as u32;
+        let height = vih.bmi_header.height.unsigned_abs();
+        let bit_count = vih.bmi_header.bit_count;
+        let compression = vih.bmi_header.compression;
+        let bottom_up = vih.bmi_header.height > 0;
+
+        // Release ISampleGrabber
+        let release_fn: unsafe extern "system" fn(*mut core::ffi::c_void) -> u32 =
+            std::mem::transmute(*vt.add(2));
+        release_fn(grabber_ptr);
+
+        eprintln!("[CAMERA] DS format: {}x{} {}bpp compression=0x{:08x} bufsize={}",
+            width, height, bit_count, compression, buffer.len());
+
+        // FourCC constants
+        const NV12: u32 = u32::from_le_bytes(*b"NV12");
+        const I420: u32 = u32::from_le_bytes(*b"I420");
+        const YV12: u32 = u32::from_le_bytes(*b"YV12");
+        const YUY2: u32 = u32::from_le_bytes(*b"YUY2");
+        const UYVY: u32 = u32::from_le_bytes(*b"UYVY");
+
+        let mut img = image::RgbImage::new(width, height);
+        let w = width as usize;
+        let h = height as usize;
+
+        match compression {
+            NV12 => {
+                // NV12: Y plane (w*h), then interleaved UV plane (w*h/2)
+                let y_plane = &buffer[..w * h];
+                let uv_plane = &buffer[w * h..];
+                for row in 0..h {
+                    let src_row = row; // Planar YUV is always top-down
+                    for col in 0..w {
+                        let y_val = y_plane[src_row * w + col] as f32;
+                        let uv_idx = (src_row / 2) * w + (col & !1);
+                        let u_val = uv_plane.get(uv_idx).copied().unwrap_or(128) as f32 - 128.0;
+                        let v_val = uv_plane.get(uv_idx + 1).copied().unwrap_or(128) as f32 - 128.0;
+                        let r = (y_val + 1.402 * v_val).clamp(0.0, 255.0) as u8;
+                        let g = (y_val - 0.344 * u_val - 0.714 * v_val).clamp(0.0, 255.0) as u8;
+                        let b = (y_val + 1.772 * u_val).clamp(0.0, 255.0) as u8;
+                        img.put_pixel(col as u32, row as u32, image::Rgb([r, g, b]));
+                    }
+                }
+            }
+            I420 | YV12 => {
+                // I420: Y (w*h), U (w*h/4), V (w*h/4)
+                // YV12: Y (w*h), V (w*h/4), U (w*h/4) — swapped
+                let y_plane = &buffer[..w * h];
+                let uv_size = w * h / 4;
+                let (u_plane, v_plane) = if compression == I420 {
+                    (&buffer[w * h..w * h + uv_size], &buffer[w * h + uv_size..])
+                } else {
+                    (&buffer[w * h + uv_size..], &buffer[w * h..w * h + uv_size])
+                };
+                for row in 0..h {
+                    let src_row = row; // Planar YUV is always top-down
+                    for col in 0..w {
+                        let y_val = y_plane[src_row * w + col] as f32;
+                        let uv_idx = (src_row / 2) * (w / 2) + col / 2;
+                        let u_val = u_plane.get(uv_idx).copied().unwrap_or(128) as f32 - 128.0;
+                        let v_val = v_plane.get(uv_idx).copied().unwrap_or(128) as f32 - 128.0;
+                        let r = (y_val + 1.402 * v_val).clamp(0.0, 255.0) as u8;
+                        let g = (y_val - 0.344 * u_val - 0.714 * v_val).clamp(0.0, 255.0) as u8;
+                        let b = (y_val + 1.772 * u_val).clamp(0.0, 255.0) as u8;
+                        img.put_pixel(col as u32, row as u32, image::Rgb([r, g, b]));
+                    }
+                }
+            }
+            _ => {
+                // RGB/BGR formats based on bit_count
+                let bytes_per_pixel = (bit_count / 8) as usize;
+                if bytes_per_pixel == 0 {
+                    CoUninitialize();
+                    return Err(format!("DS: Unsupported format: {}bpp compression=0x{:08x}", bit_count, compression));
+                }
+                let stride = ((w * bytes_per_pixel + 3) / 4 * 4) as usize;
+                for row in 0..h {
+                    let src_row = row; // Planar YUV is always top-down
+                    for col in 0..w {
+                        let offset = src_row * stride + col * bytes_per_pixel;
+                        if offset + bytes_per_pixel <= buffer.len() {
+                            let (r, g, b) = match bytes_per_pixel {
+                                3 => (buffer[offset + 2], buffer[offset + 1], buffer[offset]),
+                                4 => (buffer[offset + 2], buffer[offset + 1], buffer[offset]),
+                                2 => { // YUY2/UYVY
+                                    let luma = buffer[offset];
+                                    (luma, luma, luma)
+                                }
+                                _ => (128, 128, 128),
+                            };
+                            img.put_pixel(col as u32, row as u32, image::Rgb([r, g, b]));
+                        }
+                    }
+                }
+            }
+        }
+
+        CoUninitialize();
+        eprintln!("[CAMERA] DS capture successful: {}x{} {}bpp bottom_up={}", width, height, bit_count, bottom_up);
+        Ok(DynamicImage::ImageRgb8(img))
     }
 }
 

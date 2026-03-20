@@ -1,5 +1,6 @@
 import { useState, useEffect, useRef, useCallback } from "react";
 import { invoke } from "@tauri-apps/api/core";
+import { listen } from "@tauri-apps/api/event";
 import LogViewer from "../components/LogViewer";
 import { useSelector, useDispatch } from "react-redux";
 import { type RootState } from "../store/store";
@@ -59,6 +60,10 @@ export default function Dashboard() {
     if (windowList.length === 0) tasks.push(handleRefreshWindows());
     if (cameraList.length === 0) tasks.push(handleRefreshCameras());
     Promise.all(tasks);
+
+    // Reload config when region is saved from the selector window
+    const unlisten = listen("region-saved", () => { loadConfig(); });
+    return () => { unlisten.then(fn => fn()); };
   }, []);
 
   const loadConfig = async () => {

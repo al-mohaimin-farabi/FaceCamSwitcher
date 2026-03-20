@@ -13,6 +13,11 @@ const filesToCopy = [
         source: path.join(__dirname, 'src-tauri', 'target', 'release', 'efinity-facecam.exe'),
         target: path.join(rootDir, 'FaceCam.exe'),
         label: 'FaceCam.exe (Tauri App)',
+    },
+    {
+        source: path.join(__dirname, 'src-tauri', 'target', 'release', 'DirectML.dll'),
+        target: path.join(rootDir, 'DirectML.dll'),
+        label: 'DirectML.dll (ONNX Runtime)',
     }
 ];
 

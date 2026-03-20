@@ -32,7 +32,7 @@
   "bundle": {
     "active": true,
     "targets": "nsis",
-    "resources": ["models/"],
+    "resources": ["models/", "DirectML.dll"],
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -43,6 +43,9 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine"
+      },
+      "webviewInstallMode": {
+        "type": "downloadBootstrapper"
       }
     }
   }

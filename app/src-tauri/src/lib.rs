@@ -1022,6 +1022,9 @@ async fn save_selected_region(
         },
     );
 
+    // Notify frontend to reload config
+    let _ = app.emit("region-saved", ());
+
     // Clear stored image to free memory
     *rs_state.image_b64.lock().unwrap() = None;
 
