@@ -5,7 +5,15 @@ import Settings from "./pages/Settings";
 import { LayoutDashboard, Users, Settings as SettingsIcon } from "lucide-react";
 import { useDispatch } from "react-redux";
 import { listen } from "@tauri-apps/api/event";
-import { addLog, incrementScans, incrementDetections, incrementMatches, setPreviewData, setIsRunning, type PreviewData } from "./store/appSlice";
+import {
+  addLog,
+  incrementScans,
+  incrementDetections,
+  incrementMatches,
+  setPreviewData,
+  setIsRunning,
+  type PreviewData,
+} from "./store/appSlice";
 
 type Page = "dashboard" | "players" | "settings";
 
@@ -15,26 +23,39 @@ function App() {
 
   useEffect(() => {
     // Global Tauri event listeners mapped to Redux
-    const unlistenLog = listen<{ level: string; message: string }>("log", (event) => {
-      if (event.payload.level === "preview") {
-        try {
-          const data: PreviewData = JSON.parse(event.payload.message);
-          dispatch(setPreviewData(data));
-          // Update stats from actual detection data
-          dispatch(incrementScans());
-          if (data.detections && data.detections.length > 0) {
-            dispatch(incrementDetections(data.detections.length));
-            const matchCount = data.detections.filter((d) => d.matched_name).length;
-            if (matchCount > 0) {
-              dispatch(incrementMatches(matchCount));
+    const unlistenLog = listen<{ level: string; message: string }>(
+      "log",
+      (event) => {
+        if (event.payload.level === "preview") {
+          try {
+            const data: PreviewData = JSON.parse(event.payload.message);
+            dispatch(setPreviewData(data));
+            // Update stats from actual detection data
+            dispatch(incrementScans());
+            if (data.detections && data.detections.length > 0) {
+              dispatch(incrementDetections(data.detections.length));
+              const matchCount = data.detections.filter(
+                (d) => d.matched_name,
+              ).length;
+              if (matchCount > 0) {
+                dispatch(incrementMatches(matchCount));
+              }
             }
+          } catch (err) {
+            console.log(err);
           }
-        } catch {}
-        return;
-      }
-      const time = new Date().toLocaleTimeString("en-US", { hour12: false });
-      dispatch(addLog({ time, level: event.payload.level, message: event.payload.message }));
-    });
+          return;
+        }
+        const time = new Date().toLocaleTimeString("en-US", { hour12: false });
+        dispatch(
+          addLog({
+            time,
+            level: event.payload.level,
+            message: event.payload.message,
+          }),
+        );
+      },
+    );
 
     const unlistenStop = listen("ocr_stopped", () => {
       dispatch(setIsRunning(false));
@@ -47,7 +68,9 @@ function App() {
   }, [dispatch]);
 
   return (
-    <div className="gradient-bg" style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
+    <div
+      className="gradient-bg"
+      style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
       {/* ── Header ──────────────────────────────── */}
       <header
         style={{
@@ -59,8 +82,7 @@ function App() {
           gap: "14px",
           position: "relative",
           zIndex: 10,
-        }}
-      >
+        }}>
         {/* Logo + Title */}
         <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
           <div
@@ -75,8 +97,7 @@ function App() {
               justifyContent: "center",
               boxShadow: "0 4px 12px rgba(0, 0, 0, 0.4)",
               overflow: "hidden",
-            }}
-          >
+            }}>
             <img src="/logo.svg" alt="Logo" style={{ width: 28, height: 28 }} />
           </div>
           <div>
@@ -89,37 +110,32 @@ function App() {
                 WebkitTextFillColor: "transparent",
                 letterSpacing: "-0.02em",
                 lineHeight: 1.2,
-              }}
-            >
+              }}>
               Efinity FaceCam
             </h1>
-
           </div>
         </div>
 
         {/* Navigation Tabs */}
-        <div className="tab-bar" style={{ marginLeft: "auto", padding: '4px' }}>
+        <div className="tab-bar" style={{ marginLeft: "auto", padding: "4px" }}>
           <button
             className={`tab-item ${currentPage === "dashboard" ? "active" : ""}`}
             onClick={() => setCurrentPage("dashboard")}
-            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-          >
+            style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <LayoutDashboard size={16} />
             Dashboard
           </button>
           <button
             className={`tab-item ${currentPage === "players" ? "active" : ""}`}
             onClick={() => setCurrentPage("players")}
-            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-          >
+            style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <Users size={16} />
             Players
           </button>
           <button
             className={`tab-item ${currentPage === "settings" ? "active" : ""}`}
             onClick={() => setCurrentPage("settings")}
-            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-          >
+            style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <SettingsIcon size={16} />
             Settings
           </button>
@@ -142,12 +158,11 @@ function App() {
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-        }}
-      >
-        <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>
+        }}>
+        <span
+          style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>
           Efinity FaceCam v1.0 • Developed by themisuwu
         </span>
-
       </footer>
     </div>
   );

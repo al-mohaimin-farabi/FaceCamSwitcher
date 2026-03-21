@@ -2,6 +2,8 @@ mod capture;
 mod matcher;
 mod ocr;
 
+use futures_util::{SinkExt, StreamExt};
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -9,12 +11,26 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{interval, Duration};
+use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 // ── State ────────────────────────────────────────────────────────────
+
+/// A player fetched from the server API (replaces Players Name.txt when server sync is enabled).
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct Player {
+    id: String,
+    ign: String,
+    #[serde(rename = "playerNumber")]
+    player_number: Option<i32>,
+}
 
 struct OcrState {
     running: AtomicBool,
     matcher: Mutex<matcher::FuzzyMatcher>,
+    /// Players fetched from server API — used for WebSocket player ID lookup.
+    fetched_players: Mutex<Vec<Player>>,
+    /// Channel sender to push messages into the active WebSocket connection.
+    ws_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
 }
 
 /// Holds captured image data for the region selector overlay window.
@@ -89,14 +105,21 @@ struct CameraInfo {
 struct ServerConfig {
     #[serde(default)]
     enabled: bool,
-    url: String,
+    /// Legacy field — kept so old config.json files still deserialize without error.
     #[serde(default)]
-    players_api_url: String,
-    method: String,
-    headers: serde_json::Value,
-    timeout: u32,
-    retry_count: u32,
-    retry_delay: f64,
+    url: String,
+    /// Base URL of the FaceCam API server (e.g. https://facecamapi.ecube.gg).
+    #[serde(default)]
+    api_url: String,
+    /// WebSocket URL for the OCR bridge (e.g. wss://facecamapi.ecube.gg).
+    #[serde(default)]
+    ws_url: String,
+    /// Tournament ID to load players from.
+    #[serde(default)]
+    tournament_id: String,
+    /// OCR_SECRET_KEY from the server .env — used for API auth and WS auth.
+    #[serde(default)]
+    secret_key: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -151,13 +174,11 @@ fn ensure_default_config(dir: &PathBuf) {
   },
   "server": {
     "enabled": false,
-    "url": "http://localhost:3000/api/player",
-    "players_api_url": "",
-    "method": "POST",
-    "headers": {},
-    "timeout": 5,
-    "retry_count": 3,
-    "retry_delay": 1.0
+    "url": "",
+    "api_url": "https://facecamapi.ecube.gg",
+    "ws_url": "wss://facecamapi.ecube.gg",
+    "tournament_id": "",
+    "secret_key": ""
   },
   "ocr": {
     "language": "en",
@@ -615,6 +636,92 @@ fn remove_player(
     })
 }
 
+// ── Server Integration ───────────────────────────────────────────────
+
+#[derive(Deserialize)]
+struct FetchPlayersResponse {
+    players: Vec<Player>,
+}
+
+/// Fetch tournament player list from the server API.
+/// Updates the FuzzyMatcher and stores players for WebSocket ID lookup.
+/// Call this once before starting OCR (via the Settings "Fetch Players" button).
+#[tauri::command]
+async fn fetch_players_from_server(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<OcrState>>,
+) -> Result<Vec<Player>, String> {
+    let config = load_config()?;
+
+    if !config.server.enabled {
+        return Err("Server sync is disabled. Enable it in Settings.".into());
+    }
+    if config.server.api_url.is_empty()
+        || config.server.tournament_id.is_empty()
+        || config.server.secret_key.is_empty()
+    {
+        return Err("API URL, Tournament ID, and Secret Key are all required.".into());
+    }
+
+    let url = format!(
+        "{}/api/ocr/tournament/{}",
+        config.server.api_url.trim_end_matches('/'),
+        config.server.tournament_id
+    );
+
+    let client = HttpClient::new();
+    let resp = client
+        .get(&url)
+        .header(
+            "Authorization",
+            format!("Bearer {}", config.server.secret_key),
+        )
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server returned {}", resp.status()));
+    }
+
+    let data: FetchPlayersResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    // Store fetched players for WebSocket ID lookups
+    {
+        let mut fp = state.fetched_players.lock().unwrap();
+        *fp = data.players.clone();
+    }
+
+    // Update the live FuzzyMatcher with the new IGN list
+    let igns: Vec<String> = data.players.iter().map(|p| p.ign.clone()).collect();
+    if let Ok(mut m) = state.matcher.lock() {
+        m.update_players(igns.clone());
+    }
+
+    // Write to Players Name.txt so the Players page reflects the server list
+    let players_path = get_players_path();
+    let content = igns.join("\n");
+    fs::write(&players_path, &content)
+        .map_err(|e| format!("Failed to write Players Name.txt: {e}"))?;
+
+    let _ = app.emit(
+        "log",
+        LogEvent {
+            level: "success".into(),
+            message: format!(
+                "Loaded {} players from server (tournament: {})",
+                data.players.len(),
+                config.server.tournament_id
+            ),
+        },
+    );
+
+    Ok(data.players)
+}
+
 // ── OCR Commands (native Rust) ──────────────────────────────────────
 
 #[tauri::command]
@@ -626,17 +733,188 @@ async fn start_ocr(
         return Err("OCR already running".into());
     }
 
-    let state = state.inner().clone();
-    let app = app.clone();
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            state.running.store(false, Ordering::SeqCst);
+            return Err(format!("Failed to load config: {e}"));
+        }
+    };
 
+    let state_arc = state.inner().clone();
+
+    // If server sync is enabled, connect WebSocket before starting OCR loop
+    if config.server.enabled && !config.server.ws_url.is_empty() {
+        let ws_url = format!(
+            "{}/ocr-ws",
+            config.server.ws_url.trim_end_matches('/')
+        );
+        let state_ws = state_arc.clone();
+        let app_ws = app.clone();
+        let tournament_id = config.server.tournament_id.clone();
+        let secret_key = config.server.secret_key.clone();
+        tokio::spawn(async move {
+            run_ws_loop(app_ws, state_ws, ws_url, tournament_id, secret_key).await;
+        });
+    }
+
+    let app_ocr = app.clone();
     tokio::spawn(async move {
-        run_ocr_loop(app, state).await;
+        run_ocr_loop(app_ocr, state_arc).await;
     });
 
     Ok(CommandResult {
         success: true,
         message: "OCR capture started (Rust native)".into(),
     })
+}
+
+/// Maintains a persistent WebSocket connection to the server OCR bridge.
+/// Authenticates on connect, then forwards messages from the OCR loop.
+/// Reconnects automatically if the connection drops while OCR is running.
+async fn run_ws_loop(
+    app: AppHandle,
+    state: Arc<OcrState>,
+    ws_url: String,
+    tournament_id: String,
+    secret_key: String,
+) {
+    let reconnect_delay = Duration::from_secs(5);
+
+    while state.running.load(Ordering::SeqCst) {
+        let _ = app.emit(
+            "log",
+            LogEvent {
+                level: "info".into(),
+                message: format!("Connecting to WebSocket: {ws_url}"),
+            },
+        );
+
+        match connect_async(&ws_url).await {
+            Ok((ws_stream, _)) => {
+                let (mut write, mut read) = ws_stream.split();
+
+                // Send auth message
+                let auth_msg = serde_json::json!({
+                    "type": "auth",
+                    "secretKey": secret_key,
+                    "tournamentId": tournament_id,
+                })
+                .to_string();
+
+                if let Err(e) = write.send(Message::Text(auth_msg.into())).await {
+                    let _ = app.emit(
+                        "log",
+                        LogEvent {
+                            level: "error".into(),
+                            message: format!("WS auth send failed: {e}"),
+                        },
+                    );
+                    break;
+                }
+
+                // Create channel for OCR loop → WebSocket
+                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                {
+                    let mut ws_tx = state.ws_tx.lock().unwrap();
+                    *ws_tx = Some(tx);
+                }
+
+                let _ = app.emit("ws_status", serde_json::json!({ "connected": true }));
+                let _ = app.emit(
+                    "log",
+                    LogEvent {
+                        level: "success".into(),
+                        message: "WebSocket connected to server".into(),
+                    },
+                );
+
+                // Spawn write task: forwards OCR messages to WebSocket
+                let write_task = tokio::spawn(async move {
+                    while let Some(msg) = rx.recv().await {
+                        if write.send(Message::Text(msg.into())).await.is_err() {
+                            break;
+                        }
+                    }
+                });
+
+                // Read loop: handle auth response and keep-alive pings
+                let mut auth_ok = false;
+                while state.running.load(Ordering::SeqCst) {
+                    match read.next().await {
+                        Some(Ok(Message::Text(text))) => {
+                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
+                                if v["type"] == "auth" {
+                                    if v["success"] == false {
+                                        let _ = app.emit(
+                                            "log",
+                                            LogEvent {
+                                                level: "error".into(),
+                                                message: format!(
+                                                    "WS auth rejected: {}",
+                                                    v["message"].as_str().unwrap_or("unknown")
+                                                ),
+                                            },
+                                        );
+                                        // Auth failed — don't reconnect
+                                        state.running.store(false, Ordering::SeqCst);
+                                        break;
+                                    } else {
+                                        auth_ok = true;
+                                    }
+                                }
+                            }
+                        }
+                        Some(Ok(Message::Ping(data))) => {
+                            // Pong is handled automatically by tungstenite
+                            let _ = data;
+                        }
+                        Some(Ok(Message::Close(_))) | None => break,
+                        Some(Err(e)) => {
+                            let _ = app.emit(
+                                "log",
+                                LogEvent {
+                                    level: "warning".into(),
+                                    message: format!("WS read error: {e}"),
+                                },
+                            );
+                            break;
+                        }
+                        _ => {}
+                    }
+                }
+
+                let _ = auth_ok; // suppress unused warning
+
+                // Cleanup
+                write_task.abort();
+                {
+                    let mut ws_tx = state.ws_tx.lock().unwrap();
+                    *ws_tx = None;
+                }
+                let _ = app.emit("ws_status", serde_json::json!({ "connected": false }));
+            }
+            Err(e) => {
+                let _ = app.emit(
+                    "log",
+                    LogEvent {
+                        level: "warning".into(),
+                        message: format!("WS connect failed: {e}. Retrying in 5s..."),
+                    },
+                );
+            }
+        }
+
+        if !state.running.load(Ordering::SeqCst) {
+            break;
+        }
+
+        tokio::time::sleep(reconnect_delay).await;
+    }
+
+    // Final cleanup
+    let mut ws_tx = state.ws_tx.lock().unwrap();
+    *ws_tx = None;
 }
 
 async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
@@ -797,6 +1075,51 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
 
         // Send preview with detections
         send_preview(&app, &preview_b64, &detections);
+
+        // Send OCR result to server via WebSocket
+        {
+            let best_match = detections
+                .iter()
+                .filter(|d| d.matched_name.is_some())
+                .max_by(|a, b| {
+                    a.match_score
+                        .partial_cmp(&b.match_score)
+                        .unwrap_or(std::cmp::Ordering::Equal)
+                });
+
+            if let Ok(ws_tx_guard) = state.ws_tx.lock() {
+                if let Some(tx) = ws_tx_guard.as_ref() {
+                    let msg = if let Some(det) = best_match {
+                        // Look up player ID from fetched_players by IGN
+                        let player_id = {
+                            let fp = state.fetched_players.lock().unwrap();
+                            fp.iter()
+                                .find(|p| {
+                                    p.ign.to_lowercase()
+                                        == det
+                                            .matched_name
+                                            .as_deref()
+                                            .unwrap_or("")
+                                            .to_lowercase()
+                                })
+                                .map(|p| p.id.clone())
+                        };
+                        match player_id {
+                            Some(pid) => serde_json::json!({
+                                "type": "playerDetected",
+                                "playerId": pid
+                            })
+                            .to_string(),
+                            // IGN matched but player not in fetched list — send noMatch
+                            None => serde_json::json!({ "type": "noMatch" }).to_string(),
+                        }
+                    } else {
+                        serde_json::json!({ "type": "noMatch" }).to_string()
+                    };
+                    let _ = tx.send(msg);
+                }
+            }
+        }
     }
 
     let _ = app.emit(
@@ -1070,6 +1393,8 @@ pub fn run() {
             app.manage(Arc::new(OcrState {
                 running: AtomicBool::new(false),
                 matcher: Mutex::new(matcher::FuzzyMatcher::new(players, threshold)),
+                fetched_players: Mutex::new(Vec::new()),
+                ws_tx: Mutex::new(None),
             }));
 
             app.manage(Arc::new(RegionSelectorState {
@@ -1100,6 +1425,7 @@ pub fn run() {
             save_players,
             add_player,
             remove_player,
+            fetch_players_from_server,
             start_ocr,
             stop_ocr,
             check_backend,

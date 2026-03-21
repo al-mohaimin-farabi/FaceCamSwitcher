@@ -12,17 +12,12 @@
     "camera_index": 2
   },
   "server": {
-    "enabled": false,
+    "enabled": true,
     "url": "http://localhost:3000/api/facecam",
-    "players_api_url": "",
-    "method": "POST",
-    "headers": {
-      "Authorization": "Bearer YOUR_API_KEY_HERE",
-      "Content-Type": "application/json"
-    },
-    "timeout": 2,
-    "retry_count": 1,
-    "retry_delay": 0.5
+    "api_url": "http://192.168.68.100:5000",
+    "ws_url": "ws://192.168.68.100:5000",
+    "tournament_id": "cmma2pbn40002mwi9kqwxd1cy",
+    "secret_key": "41de4a14327bdb6e84bc0667575d52048a164e01ffc0b39520a27223937ff8b3"
   },
   "ocr": {
     "language": "en",
@@ -36,17 +31,17 @@
     "debug_screenshot_dir": "debug_captures"
   },
   "saved_regions": {
-    "*I want to make a Stand-alone FaceCa - Notepad": {
-      "left": 9,
-      "top": 249,
-      "width": 235,
-      "height": 43
-    },
     "@JARV!S - Discord": {
       "left": 59,
       "top": 325,
       "width": 222,
       "height": 37
+    },
+    "*I want to make a Stand-alone FaceCa - Notepad": {
+      "left": 9,
+      "top": 249,
+      "width": 235,
+      "height": 43
     }
   }
 }

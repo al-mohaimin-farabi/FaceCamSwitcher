@@ -41,8 +41,7 @@ export default function LogViewer({ logs, onClear }: LogViewerProps) {
         display: "flex",
         flexDirection: "column",
         overflow: "hidden",
-      }}
-    >
+      }}>
       {/* ── Header ────────────────── */}
       <div
         style={{
@@ -51,8 +50,7 @@ export default function LogViewer({ logs, onClear }: LogViewerProps) {
           justifyContent: "space-between",
           padding: "12px 16px",
           borderBottom: "1px solid var(--border)",
-        }}
-      >
+        }}>
         <div className="section-header" style={{ marginBottom: 0 }}>
           <span className="icon">📋</span> Live Log
           <span
@@ -64,8 +62,7 @@ export default function LogViewer({ logs, onClear }: LogViewerProps) {
               color: "var(--accent)",
               fontWeight: 700,
               marginLeft: 4,
-            }}
-          >
+            }}>
             {logs.length}
           </span>
         </div>
@@ -81,8 +78,7 @@ export default function LogViewer({ logs, onClear }: LogViewerProps) {
           flex: 1,
           overflow: "auto",
           padding: "8px 12px",
-        }}
-      >
+        }}>
         {logs.length === 0 ? (
           <div
             style={{
@@ -90,9 +86,16 @@ export default function LogViewer({ logs, onClear }: LogViewerProps) {
               padding: 40,
               color: "var(--text-muted)",
               fontSize: 13,
-            }}
-          >
-            <span style={{ fontSize: 28, display: "block", marginBottom: 8, opacity: 0.4 }}>📋</span>
+            }}>
+            <span
+              style={{
+                fontSize: 28,
+                display: "block",
+                marginBottom: 8,
+                opacity: 0.4,
+              }}>
+              📋
+            </span>
             No log entries yet
             <p style={{ fontSize: 11, marginTop: 6, opacity: 0.6 }}>
               Start capture to see live OCR results
@@ -108,8 +111,7 @@ export default function LogViewer({ logs, onClear }: LogViewerProps) {
                   width: 14,
                   textAlign: "center",
                   flexShrink: 0,
-                }}
-              >
+                }}>
                 {getLevelIcon(entry.level)}
               </span>
               <span className="msg">{entry.message}</span>

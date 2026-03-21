@@ -33,13 +33,11 @@ export interface AppConfig {
   };
   server: {
     enabled: boolean;
-    url: string;
-    players_api_url: string;
-    method: string;
-    headers: Record<string, string>;
-    timeout: number;
-    retry_count: number;
-    retry_delay: number;
+    url: string;        // legacy field — kept for backward compat
+    api_url: string;    // base URL for GET /api/ocr/tournament/:id
+    ws_url: string;     // WebSocket URL for OCR bridge
+    tournament_id: string;
+    secret_key: string;
   };
   ocr: {
     language: string;
@@ -78,6 +76,8 @@ interface AppState {
   cameraList: CameraInfo[];
   backendOk: boolean;
   backendStatus: string;
+  fetchedPlayerCount: number;
+  wsConnected: boolean;
 }
 
 const initialState: AppState = {
@@ -90,6 +90,8 @@ const initialState: AppState = {
   cameraList: [],
   backendOk: false,
   backendStatus: "Checking...",
+  fetchedPlayerCount: 0,
+  wsConnected: false,
 };
 
 export const appSlice = createSlice({
@@ -147,6 +149,12 @@ export const appSlice = createSlice({
       state.backendOk = action.payload.ok;
       state.backendStatus = action.payload.message;
     },
+    setFetchedPlayerCount: (state, action: PayloadAction<number>) => {
+      state.fetchedPlayerCount = action.payload;
+    },
+    setWsConnected: (state, action: PayloadAction<boolean>) => {
+      state.wsConnected = action.payload;
+    },
   },
 });
 
@@ -163,6 +171,8 @@ export const {
   setWindowList,
   setCameraList,
   setBackendStatus,
+  setFetchedPlayerCount,
+  setWsConnected,
 } = appSlice.actions;
 
 export default appSlice.reducer;

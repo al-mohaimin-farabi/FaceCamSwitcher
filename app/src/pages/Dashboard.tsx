@@ -260,7 +260,7 @@ export default function Dashboard() {
   );
 
   return (
-    <div style={{ display: "flex", height: "100%", padding: "16px", gap: "16px" }}>
+    <div style={{ display: "flex", height: "auto", padding: "16px", gap: "16px" }}>
 
       {/* ── Left Panel ─────────────────────────── */}
       <div style={{ width: 340, flexShrink: 0, display: "flex", flexDirection: "column", gap: 12 }}>
@@ -301,7 +301,6 @@ export default function Dashboard() {
                 alignItems: "center",
                 justifyContent: "center",
                 gap: 5,
-                transition: "all 0.2s",
                 background: srcType === "window" ? "var(--accent)" : "transparent",
                 color: srcType === "window" ? "#fff" : "var(--text-muted)",
               }}
@@ -322,7 +321,6 @@ export default function Dashboard() {
                 alignItems: "center",
                 justifyContent: "center",
                 gap: 5,
-                transition: "all 0.2s",
                 background: srcType === "camera" ? "var(--cyan)" : "transparent",
                 color: srcType === "camera" ? "#fff" : "var(--text-muted)",
               }}
@@ -538,7 +536,7 @@ export default function Dashboard() {
             )}
           </button>
           {isRunning && (
-            <div style={{ marginTop: 12, padding: "8px 12px", borderRadius: 8, background: "var(--green-bg)", border: "1px solid rgba(34,197,94,0.2)", display: "flex", alignItems: "center", gap: 8 }} className="animate-fade-in">
+            <div style={{ marginTop: 12, padding: "8px 12px", borderRadius: 8, background: "var(--green-bg)", border: "1px solid rgba(34,197,94,0.2)", display: "flex", alignItems: "center", gap: 8 }}>
               <span className="status-dot online" />
               <span style={{ fontSize: 12, color: "var(--green)", fontWeight: 600 }}>OCR Running</span>
             </div>
@@ -607,7 +605,7 @@ export default function Dashboard() {
               ) : previewData ? (
                 <div style={{ color: "var(--text-muted)", fontSize: 13 }}>No text detected in region</div>
               ) : (
-                <div style={{ color: "var(--text-muted)", fontSize: 12 }}>
+                <div style={{ color: "var(--text-muted)", fontSize: 12,textAlign: "center" }}>
                   {isRunning ? "Processing..." : "Waiting for capture..."}
                 </div>
               )}
