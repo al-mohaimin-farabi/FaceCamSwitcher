@@ -35,7 +35,11 @@ struct OcrState {
     /// Socket.io client for the active connection to the server.
     sio_client: Mutex<Option<SioClient>>,
     /// Last player ID sent to the server (dedup — only send on change).
-    last_sent_player: Mutex<Option<String>>,
+    /// `None` = sentinel (not yet sent), `Some(None)` = sent noMatch, `Some(Some(id))` = sent player.
+    last_sent_player: Mutex<Option<Option<String>>>,
+    /// Consecutive "no match" scan count — prevents flicker by requiring N consecutive
+    /// misses before actually sending noMatch to the server.
+    no_match_streak: Mutex<u32>,
 }
 
 /// Holds captured image data for the region selector overlay window.
@@ -641,6 +645,56 @@ fn remove_player(
     })
 }
 
+#[tauri::command]
+fn rename_player(
+    old_name: String,
+    new_name: String,
+    state: tauri::State<'_, Arc<OcrState>>,
+) -> Result<CommandResult, String> {
+    let path = get_players_path();
+    let mut names = load_players().unwrap_or_default();
+
+    let trimmed_new = new_name.trim().to_uppercase();
+    if trimmed_new.is_empty() {
+        return Ok(CommandResult {
+            success: false,
+            message: "New name cannot be empty".into(),
+        });
+    }
+
+    // Find the old name
+    let pos = names.iter().position(|n| n.to_uppercase() == old_name.to_uppercase());
+    match pos {
+        None => Ok(CommandResult {
+            success: false,
+            message: format!("'{}' not found", old_name),
+        }),
+        Some(idx) => {
+            // Check if new name already exists (and isn't the same entry)
+            if names.iter().enumerate().any(|(i, n)| i != idx && n.to_uppercase() == trimmed_new) {
+                return Ok(CommandResult {
+                    success: false,
+                    message: format!("'{}' already exists", trimmed_new),
+                });
+            }
+
+            names[idx] = trimmed_new.clone();
+            let content = names.join("\n");
+            fs::write(&path, content)
+                .map_err(|e| format!("Failed to write players file: {}", e))?;
+
+            if let Ok(mut m) = state.matcher.lock() {
+                m.update_players(names);
+            }
+
+            Ok(CommandResult {
+                success: true,
+                message: format!("Renamed '{}' → '{}'", old_name, trimmed_new),
+            })
+        }
+    }
+}
+
 // ── Server Integration ───────────────────────────────────────────────
 
 #[derive(Deserialize)]
@@ -727,6 +781,58 @@ async fn fetch_players_from_server(
     Ok(data.players)
 }
 
+/// Fetch players from server API without needing tauri::State.
+/// Used for auto-fetching at OCR start.
+async fn auto_fetch_players(
+    app: &AppHandle,
+    state: &Arc<OcrState>,
+    config: &AppConfig,
+) -> Result<usize, String> {
+    let url = format!(
+        "{}/api/ocr/tournament/{}",
+        config.server.api_url.trim_end_matches('/'),
+        config.server.tournament_id
+    );
+
+    let client = HttpClient::new();
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {}", config.server.secret_key))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server returned {}", resp.status()));
+    }
+
+    let data: FetchPlayersResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    let count = data.players.len();
+
+    // Store for ID lookups
+    if let Ok(mut fp) = state.fetched_players.lock() {
+        *fp = data.players.clone();
+    }
+
+    // Update fuzzy matcher
+    let igns: Vec<String> = data.players.iter().map(|p| p.ign.clone()).collect();
+    if let Ok(mut m) = state.matcher.lock() {
+        m.update_players(igns.clone());
+    }
+
+    // Write to Players Name.txt
+    let players_path = get_players_path();
+    let content = igns.join("\n");
+    fs::write(&players_path, &content)
+        .map_err(|e| format!("Failed to write Players Name.txt: {e}"))?;
+
+    Ok(count)
+}
+
 // ── OCR Commands (native Rust) ──────────────────────────────────────
 
 #[tauri::command]
@@ -748,8 +854,42 @@ async fn start_ocr(
 
     let state_arc = state.inner().clone();
 
-    // If server sync is enabled, connect Socket.io before starting OCR loop
+    // Reset dedup so the first detection always sends
+    if let Ok(mut last) = state_arc.last_sent_player.lock() {
+        *last = None; // sentinel — first send always goes through
+    }
+    if let Ok(mut streak) = state_arc.no_match_streak.lock() {
+        *streak = 0;
+    }
+
+    // If server sync is enabled, auto-fetch players + connect Socket.io
     if config.server.enabled && !config.server.ws_url.is_empty() {
+        // Auto-fetch players if not already loaded
+        let fp_empty = state_arc.fetched_players.lock().map(|fp| fp.is_empty()).unwrap_or(true);
+        if fp_empty && !config.server.api_url.is_empty()
+            && !config.server.tournament_id.is_empty()
+            && !config.server.secret_key.is_empty()
+        {
+            let _ = app.emit("log", LogEvent {
+                level: "info".into(),
+                message: "Auto-fetching players from server...".into(),
+            });
+            match auto_fetch_players(&app, &state_arc, &config).await {
+                Ok(count) => {
+                    let _ = app.emit("log", LogEvent {
+                        level: "success".into(),
+                        message: format!("Auto-fetched {} players from server", count),
+                    });
+                }
+                Err(e) => {
+                    let _ = app.emit("log", LogEvent {
+                        level: "warning".into(),
+                        message: format!("Auto-fetch failed: {} — click Fetch Players manually", e),
+                    });
+                }
+            }
+        }
+
         let server_url = config.server.ws_url.trim_end_matches('/').to_string();
         let state_ws = state_arc.clone();
         let app_ws = app.clone();
@@ -992,6 +1132,11 @@ async fn run_socketio_loop(
 }
 
 async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
+    // Reset last sent player so the first detection always sends
+    if let Ok(mut last) = state.last_sent_player.lock() {
+        *last = None;
+    }
+
     // Load config
     let config: AppConfig = match load_config() {
         Ok(c) => c,
@@ -1008,6 +1153,16 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
             return;
         }
     };
+
+    // Log how many players are loaded for ID lookup
+    {
+        let fp_count = state.fetched_players.lock().map(|fp| fp.len()).unwrap_or(0);
+        let _ = app.emit("log", LogEvent {
+            level: if fp_count > 0 { "success".into() } else { "warning".into() },
+            message: format!("Player ID lookup: {} players loaded{}", fp_count,
+                if fp_count == 0 { " — click Fetch Players in Settings first!" } else { "" }),
+        });
+    }
 
     let capture_interval = config.capture.interval_seconds.max(0.1);
     let confidence_threshold = config.ocr.confidence_threshold as f32;
@@ -1155,13 +1310,43 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                     .map(|p| p.id.clone())
             });
 
-            // Log only when detected player changes (reduce log noise)
-            let log_changed = {
-                let last = state.last_sent_player.lock().unwrap();
-                *last != current_player_id
+            // Anti-flicker: require 3 consecutive "no match" scans before sending noMatch.
+            // This prevents brief OCR failures from clearing the active player.
+            const NO_MATCH_THRESHOLD: u32 = 3;
+
+            let effective_player_id: Option<String> = if current_player_id.is_some() {
+                // Player detected — reset streak and use the ID
+                if let Ok(mut streak) = state.no_match_streak.lock() {
+                    *streak = 0;
+                }
+                current_player_id.clone()
+            } else {
+                // No match — increment streak
+                let streak_val = {
+                    let mut streak = state.no_match_streak.lock().unwrap();
+                    *streak += 1;
+                    *streak
+                };
+                if streak_val >= NO_MATCH_THRESHOLD {
+                    None // actually send noMatch after N consecutive misses
+                } else {
+                    continue; // skip this scan, don't send anything yet
+                }
             };
 
-            if log_changed {
+            // Dedup: compare against last sent value.
+            // `last_sent_player` is Option<Option<String>>:
+            //   None = sentinel (never sent) → always send
+            //   Some(x) = previously sent value → only send if changed
+            let changed = {
+                let last = state.last_sent_player.lock().unwrap();
+                match &*last {
+                    None => true, // first send this session — always go
+                    Some(prev) => *prev != effective_player_id,
+                }
+            };
+
+            if changed {
                 let matched_name = best_match
                     .and_then(|d| d.matched_name.as_deref())
                     .unwrap_or("No match");
@@ -1171,7 +1356,7 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                 let confidence = best_match.map(|d| d.confidence).unwrap_or(0.0);
                 let fuzz = best_match.map(|d| d.match_score).unwrap_or(0.0);
 
-                let level = if current_player_id.is_some() { "success" } else { "info" };
+                let level = if effective_player_id.is_some() { "success" } else { "info" };
                 let _ = app.emit(
                     "log",
                     LogEvent {
@@ -1183,25 +1368,32 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                     },
                 );
 
-                if let Ok(mut last) = state.last_sent_player.lock() {
-                    *last = current_player_id.clone();
+                // Send to server
+                let client_opt = state.sio_client.lock().ok().and_then(|g| g.clone());
+                if let Some(client) = client_opt {
+                    match &effective_player_id {
+                        Some(pid) => {
+                            let _ = app.emit("log", LogEvent {
+                                level: "info".into(),
+                                message: format!("[Socket] Sending playerDetected: {}", pid),
+                            });
+                            let _ = client
+                                .emit("playerDetected", serde_json::json!({ "playerId": pid }))
+                                .await;
+                        }
+                        None => {
+                            let _ = app.emit("log", LogEvent {
+                                level: "info".into(),
+                                message: "[Socket] Sending noMatch".into(),
+                            });
+                            let _ = client.emit("noMatch", serde_json::json!({})).await;
+                        }
+                    }
                 }
-            }
 
-            // Always send to server — server dedup prevents unnecessary broadcasts.
-            // We can't dedup here because manual clicks may change activePlayerId
-            // on the server without OCR knowing.
-            let client_opt = state.sio_client.lock().ok().and_then(|g| g.clone());
-            if let Some(client) = client_opt {
-                match &current_player_id {
-                    Some(pid) => {
-                        let _ = client
-                            .emit("playerDetected", serde_json::json!({ "playerId": pid }))
-                            .await;
-                    }
-                    None => {
-                        let _ = client.emit("noMatch", serde_json::json!({})).await;
-                    }
+                // Update last sent
+                if let Ok(mut last) = state.last_sent_player.lock() {
+                    *last = Some(effective_player_id);
                 }
             }
         }
@@ -1482,6 +1674,7 @@ pub fn run() {
                 fetched_players: Mutex::new(Vec::new()),
                 sio_client: Mutex::new(None),
                 last_sent_player: Mutex::new(None),
+                no_match_streak: Mutex::new(0),
             }));
 
             app.manage(Arc::new(RegionSelectorState {
@@ -1512,6 +1705,7 @@ pub fn run() {
             save_players,
             add_player,
             remove_player,
+            rename_player,
             fetch_players_from_server,
             start_ocr,
             stop_ocr,
