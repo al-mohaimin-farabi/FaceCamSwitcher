@@ -1,13 +1,13 @@
 {
   "input_source": {
     "type": "window",
-    "window_hwnd": 1443378,
-    "window_title": "(688) FFBPL S1 গ্র্যান্ড ফাইনাল | Garena Free Fire - YouTube - Brave",
+    "window_hwnd": 5571936,
+    "window_title": "*RHK.NEJAD - Notepad",
     "window_region": {
-      "left": 0,
-      "top": 0,
-      "width": 0,
-      "height": 0
+      "left": 4,
+      "top": 85,
+      "width": 128,
+      "height": 31
     },
     "camera_index": 2
   },
@@ -15,7 +15,7 @@
     "enabled": true,
     "url": "http://localhost:3000/api/facecam",
     "api_url": "http://192.168.68.100:5000",
-    "ws_url": "ws://192.168.68.100:5000",
+    "ws_url": "http://192.168.68.100:5000",
     "tournament_id": "cmma2pbn40002mwi9kqwxd1cy",
     "secret_key": "41de4a14327bdb6e84bc0667575d52048a164e01ffc0b39520a27223937ff8b3"
   },
@@ -31,17 +31,17 @@
     "debug_screenshot_dir": "debug_captures"
   },
   "saved_regions": {
-    "@JARV!S - Discord": {
-      "left": 59,
-      "top": 325,
-      "width": 222,
-      "height": 37
-    },
     "*I want to make a Stand-alone FaceCa - Notepad": {
       "left": 9,
       "top": 249,
       "width": 235,
       "height": 43
+    },
+    "@JARV!S - Discord": {
+      "left": 59,
+      "top": 325,
+      "width": 222,
+      "height": 37
     }
   }
 }

@@ -31,10 +31,14 @@ import {
 
 export default function Settings() {
   const dispatch = useDispatch();
-  const { config, fetchedPlayerCount, wsConnected } = useSelector((state: RootState) => state.app);
+  const { config, fetchedPlayerCount, wsConnected } = useSelector(
+    (state: RootState) => state.app,
+  );
   const [isLoadingProps, setIsLoadingProps] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
   const [isFetchingPlayers, setIsFetchingPlayers] = useState(false);
+  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
+  const [fetchError, setFetchError] = useState<string | null>(null);
   const [message, setMessage] = useState<{
     text: string;
     type: "success" | "error";
@@ -54,8 +58,36 @@ export default function Settings() {
     }).then((fn) => {
       unlisten = fn;
     });
-    return () => { unlisten?.(); };
+    return () => {
+      unlisten?.();
+    };
   }, [dispatch]);
+
+  // Ping server health endpoint when API URL changes or sync is toggled
+  useEffect(() => {
+    if (!config?.server.enabled || !config.server.api_url) {
+      setServerOnline(null);
+      return;
+    }
+    let cancelled = false;
+    const checkHealth = async () => {
+      try {
+        const resp = await fetch(
+          `${config.server.api_url.replace(/\/+$/, "")}/api/health`,
+          { signal: AbortSignal.timeout(5000) },
+        );
+        if (!cancelled) setServerOnline(resp.ok);
+      } catch {
+        if (!cancelled) setServerOnline(false);
+      }
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [config?.server.enabled, config?.server.api_url]);
 
   const loadConfig = async () => {
     setIsLoadingProps(true);
@@ -93,12 +125,35 @@ export default function Settings() {
 
   const handleFetchPlayers = async () => {
     setIsFetchingPlayers(true);
+    setFetchError(null);
     try {
-      const players = await invoke<{ id: string; ign: string }[]>("fetch_players_from_server");
+      const players = await invoke<{ id: string; ign: string }[]>(
+        "fetch_players_from_server",
+      );
       dispatch(setFetchedPlayerCount(players.length));
       showMessage(`Loaded ${players.length} players from server`, "success");
     } catch (e) {
-      showMessage(`Fetch failed: ${e}`, "error");
+      const raw = String(e);
+      let friendly: string;
+      if (raw.includes("401")) {
+        friendly = "Invalid secret key — check your OCR Secret Key";
+      } else if (raw.includes("404")) {
+        friendly = "Tournament not found — check your Tournament ID";
+      } else if (raw.includes("403")) {
+        friendly =
+          "Access denied — secret key not authorized for this tournament";
+      } else if (
+        raw.includes("Request failed") ||
+        raw.includes("error sending request")
+      ) {
+        friendly =
+          "Cannot reach server — check API URL and make sure server is running";
+      } else if (raw.includes("Failed to parse")) {
+        friendly = "Server returned unexpected data — API version mismatch?";
+      } else {
+        friendly = raw;
+      }
+      setFetchError(friendly);
     } finally {
       setIsFetchingPlayers(false);
     }
@@ -137,8 +192,7 @@ export default function Settings() {
         display: "flex",
         flexDirection: "column",
         gap: 24,
-      }}
-      >
+      }}>
       {/* ── Top Bar ─────────────────────── */}
       <div
         style={{
@@ -178,8 +232,7 @@ export default function Settings() {
                   message.type === "success" ? "var(--green)" : "var(--red)",
                 fontSize: 12,
                 fontWeight: 600,
-              }}
-              >
+              }}>
               {message.type === "success" ? (
                 <CheckCircle2 size={14} />
               ) : (
@@ -360,7 +413,12 @@ export default function Settings() {
             gap: 20,
           }}>
           {/* Header + WS status badge */}
-          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+          <div
+            style={{
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "space-between",
+            }}>
             <div className="section-header" style={{ marginBottom: 0 }}>
               <Globe size={16} className="icon" /> Network Sync
             </div>
@@ -409,20 +467,29 @@ export default function Settings() {
                   }}>
                   OCR Bridge Enabled
                 </span>
-                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                <p
+                  style={{
+                    fontSize: 11,
+                    color: "var(--text-muted)",
+                    marginTop: 2,
+                  }}>
                   {config.server.enabled
-                    ? "Connects to server via WebSocket on OCR start"
+                    ? "Connects to server via Socket.io on OCR start"
                     : "Disabled — OCR runs locally only"}
                 </p>
               </div>
               <div
-                onClick={() => updateConfig("server.enabled", !config.server.enabled)}
+                onClick={() =>
+                  updateConfig("server.enabled", !config.server.enabled)
+                }
                 style={{
                   width: 36,
                   height: 20,
                   borderRadius: 10,
                   flexShrink: 0,
-                  background: config.server.enabled ? "var(--green)" : "rgba(255,255,255,0.1)",
+                  background: config.server.enabled
+                    ? "var(--green)"
+                    : "rgba(255,255,255,0.1)",
                   position: "relative",
                   cursor: "pointer",
                 }}>
@@ -450,7 +517,8 @@ export default function Settings() {
               }}>
               {/* API Base URL */}
               <div className="input-group">
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <Globe size={12} style={{ color: "var(--text-muted)" }} />
                   API Base URL
                 </label>
@@ -458,29 +526,39 @@ export default function Settings() {
                   className="input"
                   type="text"
                   value={config.server.api_url}
-                  onChange={(e) => updateConfig("server.api_url", e.target.value)}
-                  placeholder={import.meta.env.VITE_API_URL || "https://api.example.com"}
+                  onChange={(e) =>
+                    updateConfig("server.api_url", e.target.value)
+                  }
+                  placeholder={
+                    import.meta.env.VITE_API_URL || "https://api.example.com"
+                  }
                 />
               </div>
 
-              {/* WebSocket URL */}
+              {/* Socket.io Server URL */}
               <div className="input-group">
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <Wifi size={12} style={{ color: "var(--text-muted)" }} />
-                  WebSocket URL
+                  Socket.io URL
                 </label>
                 <input
                   className="input"
                   type="text"
                   value={config.server.ws_url}
-                  onChange={(e) => updateConfig("server.ws_url", e.target.value)}
-                  placeholder={import.meta.env.VITE_WS_URL || "wss://api.example.com"}
+                  onChange={(e) =>
+                    updateConfig("server.ws_url", e.target.value)
+                  }
+                  placeholder={
+                    import.meta.env.VITE_WS_URL || "https://api.example.com"
+                  }
                 />
               </div>
 
               {/* Tournament ID */}
               <div className="input-group">
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <Hash size={12} style={{ color: "var(--text-muted)" }} />
                   Tournament ID
                 </label>
@@ -488,14 +566,17 @@ export default function Settings() {
                   className="input"
                   type="text"
                   value={config.server.tournament_id}
-                  onChange={(e) => updateConfig("server.tournament_id", e.target.value)}
+                  onChange={(e) =>
+                    updateConfig("server.tournament_id", e.target.value)
+                  }
                   placeholder="e.g. clx1abc23def456"
                 />
               </div>
 
               {/* Secret Key */}
               <div className="input-group">
-                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                <label
+                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
                   <Key size={12} style={{ color: "var(--text-muted)" }} />
                   Secret Key
                 </label>
@@ -503,10 +584,41 @@ export default function Settings() {
                   className="input"
                   type="password"
                   value={config.server.secret_key}
-                  onChange={(e) => updateConfig("server.secret_key", e.target.value)}
+                  onChange={(e) =>
+                    updateConfig("server.secret_key", e.target.value)
+                  }
                   placeholder="64-character OCR secret"
                 />
               </div>
+
+              {/* Server status badge */}
+              {serverOnline !== null && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "center",
+                    gap: 6,
+                    padding: "6px 12px",
+                    borderRadius: 8,
+                    background: serverOnline
+                      ? "rgba(34,197,94,0.08)"
+                      : "rgba(239,68,68,0.08)",
+                    border: `1px solid ${serverOnline ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"}`,
+                    fontSize: 11,
+                    fontWeight: 600,
+                    color: serverOnline ? "var(--green)" : "#ef4444",
+                  }}>
+                  <div
+                    style={{
+                      width: 7,
+                      height: 7,
+                      borderRadius: "50%",
+                      background: serverOnline ? "#22c55e" : "#ef4444",
+                    }}
+                  />
+                  Tournament Server {serverOnline ? "Online" : "Offline"}
+                </div>
+              )}
 
               {/* Fetch Players button + count badge */}
               <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
@@ -546,6 +658,30 @@ export default function Settings() {
                   </div>
                 )}
               </div>
+
+              {/* API error message */}
+              {fetchError && (
+                <div
+                  style={{
+                    display: "flex",
+                    alignItems: "flex-start",
+                    gap: 8,
+                    padding: "8px 12px",
+                    borderRadius: 8,
+                    background: "rgba(239,68,68,0.08)",
+                    border: "1px solid rgba(239,68,68,0.2)",
+                    color: "#ef4444",
+                    fontSize: 11,
+                    fontWeight: 500,
+                    lineHeight: 1.4,
+                  }}>
+                  <AlertCircle
+                    size={14}
+                    style={{ flexShrink: 0, marginTop: 1 }}
+                  />
+                  {fetchError}
+                </div>
+              )}
             </div>
           </div>
         </div>

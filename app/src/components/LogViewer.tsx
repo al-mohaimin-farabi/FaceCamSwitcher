@@ -102,7 +102,7 @@ export default function LogViewer({ logs, onClear }: LogViewerProps) {
             </p>
           </div>
         ) : (
-          logs.map((entry, i) => (
+          logs.filter((e) => e.level !== "preview").map((entry, i) => (
             <div key={i} className={`log-entry ${entry.level}`}>
               <span className="time">{entry.time}</span>
               <span

@@ -120,7 +120,7 @@ export const appSlice = createSlice({
     },
     addLog: (state, action: PayloadAction<LogEntry>) => {
       state.logs.push(action.payload);
-      if (state.logs.length > 200) {
+      if (state.logs.length > 50) {
         state.logs.shift();
       }
     },

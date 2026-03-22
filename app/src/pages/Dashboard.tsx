@@ -260,7 +260,7 @@ export default function Dashboard() {
   );
 
   return (
-    <div style={{ display: "flex", height: "auto", padding: "16px", gap: "16px" }}>
+    <div style={{ display: "flex", height: "100%", padding: "16px", gap: "16px" }}>
 
       {/* ── Left Panel ─────────────────────────── */}
       <div style={{ width: 340, flexShrink: 0, display: "flex", flexDirection: "column", gap: 12 }}>

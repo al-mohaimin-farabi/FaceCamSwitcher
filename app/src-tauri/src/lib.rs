@@ -2,8 +2,10 @@ mod capture;
 mod matcher;
 mod ocr;
 
-use futures_util::{SinkExt, StreamExt};
+use futures_util::FutureExt;
 use reqwest::Client as HttpClient;
+use rust_socketio::asynchronous::{Client as SioClient, ClientBuilder};
+use rust_socketio::Payload;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -11,7 +13,6 @@ use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{interval, Duration};
-use tokio_tungstenite::{connect_async, tungstenite::protocol::Message};
 
 // ── State ────────────────────────────────────────────────────────────
 
@@ -26,11 +27,15 @@ struct Player {
 
 struct OcrState {
     running: AtomicBool,
+    /// True while Socket.io is connected and authenticated.
+    sio_connected: AtomicBool,
     matcher: Mutex<matcher::FuzzyMatcher>,
     /// Players fetched from server API — used for WebSocket player ID lookup.
     fetched_players: Mutex<Vec<Player>>,
-    /// Channel sender to push messages into the active WebSocket connection.
-    ws_tx: Mutex<Option<tokio::sync::mpsc::UnboundedSender<String>>>,
+    /// Socket.io client for the active connection to the server.
+    sio_client: Mutex<Option<SioClient>>,
+    /// Last player ID sent to the server (dedup — only send on change).
+    last_sent_player: Mutex<Option<String>>,
 }
 
 /// Holds captured image data for the region selector overlay window.
@@ -743,18 +748,15 @@ async fn start_ocr(
 
     let state_arc = state.inner().clone();
 
-    // If server sync is enabled, connect WebSocket before starting OCR loop
+    // If server sync is enabled, connect Socket.io before starting OCR loop
     if config.server.enabled && !config.server.ws_url.is_empty() {
-        let ws_url = format!(
-            "{}/ocr-ws",
-            config.server.ws_url.trim_end_matches('/')
-        );
+        let server_url = config.server.ws_url.trim_end_matches('/').to_string();
         let state_ws = state_arc.clone();
         let app_ws = app.clone();
         let tournament_id = config.server.tournament_id.clone();
         let secret_key = config.server.secret_key.clone();
         tokio::spawn(async move {
-            run_ws_loop(app_ws, state_ws, ws_url, tournament_id, secret_key).await;
+            run_socketio_loop(app_ws, state_ws, server_url, tournament_id, secret_key).await;
         });
     }
 
@@ -769,13 +771,14 @@ async fn start_ocr(
     })
 }
 
-/// Maintains a persistent WebSocket connection to the server OCR bridge.
-/// Authenticates on connect, then forwards messages from the OCR loop.
+/// Maintains a persistent Socket.io connection to the server.
+/// Authenticates via "ocrAuth" event, then stores the client so the OCR loop
+/// can emit "playerDetected" / "noMatch" events directly.
 /// Reconnects automatically if the connection drops while OCR is running.
-async fn run_ws_loop(
+async fn run_socketio_loop(
     app: AppHandle,
     state: Arc<OcrState>,
-    ws_url: String,
+    server_url: String,
     tournament_id: String,
     secret_key: String,
 ) {
@@ -786,112 +789,178 @@ async fn run_ws_loop(
             "log",
             LogEvent {
                 level: "info".into(),
-                message: format!("Connecting to WebSocket: {ws_url}"),
+                message: format!("Connecting to server: {server_url}"),
             },
         );
 
-        match connect_async(&ws_url).await {
-            Ok((ws_stream, _)) => {
-                let (mut write, mut read) = ws_stream.split();
+        // Clone handles for the event callbacks
+        let app_conn = app.clone();
+        let app_disc = app.clone();
+        let state_disc = state.clone();
 
-                // Send auth message
-                let auth_msg = serde_json::json!({
-                    "type": "auth",
+        let result = ClientBuilder::new(&server_url)
+            .namespace("/")
+            .on("connect", move |_payload, _client| {
+                let a = app_conn.clone();
+                async move {
+                    let _ = a.emit("ws_status", serde_json::json!({ "connected": true }));
+                    let _ = a.emit(
+                        "log",
+                        LogEvent {
+                            level: "success".into(),
+                            message: "Socket.io connected to server".into(),
+                        },
+                    );
+                }
+                .boxed()
+            })
+            .on("disconnect", move |_payload, _client| {
+                let a = app_disc.clone();
+                let s = state_disc.clone();
+                async move {
+                    let _ = a.emit("ws_status", serde_json::json!({ "connected": false }));
+                    let _ = a.emit(
+                        "log",
+                        LogEvent {
+                            level: "warning".into(),
+                            message: "Socket.io disconnected from server".into(),
+                        },
+                    );
+                    // Signal the keep-alive loop to exit (will trigger reconnect)
+                    s.sio_connected.store(false, Ordering::SeqCst);
+                }
+                .boxed()
+            })
+            .connect()
+            .await;
+
+        match result {
+            Ok(client) => {
+                // Store client immediately so OCR loop can use it once auth succeeds
+                {
+                    let mut guard = state.sio_client.lock().unwrap();
+                    *guard = Some(client.clone());
+                }
+
+                // Authenticate with server via ocrAuth event + ack callback
+                let auth_payload = serde_json::json!({
                     "secretKey": secret_key,
                     "tournamentId": tournament_id,
-                })
-                .to_string();
+                });
 
-                if let Err(e) = write.send(Message::Text(auth_msg.into())).await {
+                let app_ack = app.clone();
+                let state_ack = state.clone();
+
+                let auth_result = Arc::new(tokio::sync::Notify::new());
+                let auth_success = Arc::new(AtomicBool::new(false));
+                let notify_clone = auth_result.clone();
+                let success_clone = auth_success.clone();
+
+                if let Err(e) = client
+                    .emit_with_ack(
+                        "ocrAuth",
+                        auth_payload,
+                        Duration::from_secs(10),
+                        move |payload: Payload, _client: SioClient| {
+                            let a = app_ack.clone();
+                            let s = state_ack.clone();
+                            let n = notify_clone.clone();
+                            let sc = success_clone.clone();
+                            async move {
+                                // Parse ack response — the server callback({ success, message })
+                                // arrives as Payload::Text([Array([Object])]) due to Socket.io
+                                // ack wrapping. Unwrap all layers to get the inner object.
+                                let response: Option<serde_json::Value> = match &payload {
+                                    Payload::Text(values) => {
+                                        let mut v = values.first().cloned();
+                                        while let Some(serde_json::Value::Array(arr)) = &v {
+                                            v = arr.first().cloned();
+                                        }
+                                        if let Some(serde_json::Value::String(s)) = &v {
+                                            v = serde_json::from_str(s).ok();
+                                        }
+                                        v
+                                    }
+                                    #[allow(unreachable_patterns)]
+                                    _ => None,
+                                };
+
+                                let ok = response.as_ref()
+                                    .and_then(|v| v.get("success"))
+                                    .and_then(|v| v.as_bool())
+                                    .unwrap_or(false);
+
+                                if ok {
+                                    s.sio_connected.store(true, Ordering::SeqCst);
+                                    sc.store(true, Ordering::SeqCst);
+                                    let _ = a.emit(
+                                        "log",
+                                        LogEvent {
+                                            level: "success".into(),
+                                            message: "OCR authenticated with server".into(),
+                                        },
+                                    );
+                                } else {
+                                    let msg = response.as_ref()
+                                        .and_then(|v| v.get("message"))
+                                        .and_then(|v| v.as_str())
+                                        .unwrap_or("unknown reason")
+                                        .to_string();
+                                    let _ = a.emit(
+                                        "log",
+                                        LogEvent {
+                                            level: "error".into(),
+                                            message: format!("OCR auth rejected: {msg}"),
+                                        },
+                                    );
+                                }
+                                n.notify_one();
+                            }
+                            .boxed()
+                        },
+                    )
+                    .await
+                {
                     let _ = app.emit(
                         "log",
                         LogEvent {
                             level: "error".into(),
-                            message: format!("WS auth send failed: {e}"),
+                            message: format!("Failed to emit ocrAuth: {e}"),
                         },
                     );
+                    if let Ok(mut g) = state.sio_client.lock() { *g = None; }
+                    let _ = client.disconnect().await;
+                    tokio::time::sleep(reconnect_delay).await;
+                    continue;
+                }
+
+                // Wait for ack
+                auth_result.notified().await;
+
+                if !auth_success.load(Ordering::SeqCst) {
+                    // Auth failed — stop trying
+                    if let Ok(mut g) = state.sio_client.lock() { *g = None; }
+                    let _ = client.disconnect().await;
+                    state.running.store(false, Ordering::SeqCst);
                     break;
                 }
 
-                // Create channel for OCR loop → WebSocket
-                let (tx, mut rx) = tokio::sync::mpsc::unbounded_channel::<String>();
+                // Stay alive while OCR is running and connected
+                while state.running.load(Ordering::SeqCst)
+                    && state.sio_connected.load(Ordering::SeqCst)
                 {
-                    let mut ws_tx = state.ws_tx.lock().unwrap();
-                    *ws_tx = Some(tx);
+                    tokio::time::sleep(Duration::from_secs(1)).await;
                 }
-
-                let _ = app.emit("ws_status", serde_json::json!({ "connected": true }));
-                let _ = app.emit(
-                    "log",
-                    LogEvent {
-                        level: "success".into(),
-                        message: "WebSocket connected to server".into(),
-                    },
-                );
-
-                // Spawn write task: forwards OCR messages to WebSocket
-                let write_task = tokio::spawn(async move {
-                    while let Some(msg) = rx.recv().await {
-                        if write.send(Message::Text(msg.into())).await.is_err() {
-                            break;
-                        }
-                    }
-                });
-
-                // Read loop: handle auth response and keep-alive pings
-                let mut auth_ok = false;
-                while state.running.load(Ordering::SeqCst) {
-                    match read.next().await {
-                        Some(Ok(Message::Text(text))) => {
-                            if let Ok(v) = serde_json::from_str::<serde_json::Value>(&text) {
-                                if v["type"] == "auth" {
-                                    if v["success"] == false {
-                                        let _ = app.emit(
-                                            "log",
-                                            LogEvent {
-                                                level: "error".into(),
-                                                message: format!(
-                                                    "WS auth rejected: {}",
-                                                    v["message"].as_str().unwrap_or("unknown")
-                                                ),
-                                            },
-                                        );
-                                        // Auth failed — don't reconnect
-                                        state.running.store(false, Ordering::SeqCst);
-                                        break;
-                                    } else {
-                                        auth_ok = true;
-                                    }
-                                }
-                            }
-                        }
-                        Some(Ok(Message::Ping(data))) => {
-                            // Pong is handled automatically by tungstenite
-                            let _ = data;
-                        }
-                        Some(Ok(Message::Close(_))) | None => break,
-                        Some(Err(e)) => {
-                            let _ = app.emit(
-                                "log",
-                                LogEvent {
-                                    level: "warning".into(),
-                                    message: format!("WS read error: {e}"),
-                                },
-                            );
-                            break;
-                        }
-                        _ => {}
-                    }
-                }
-
-                let _ = auth_ok; // suppress unused warning
 
                 // Cleanup
-                write_task.abort();
-                {
-                    let mut ws_tx = state.ws_tx.lock().unwrap();
-                    *ws_tx = None;
+                state.sio_connected.store(false, Ordering::SeqCst);
+                if let Ok(mut guard) = state.sio_client.lock() {
+                    *guard = None;
                 }
+                if let Ok(mut lp) = state.last_sent_player.lock() {
+                    *lp = None;
+                }
+                let _ = client.disconnect().await;
                 let _ = app.emit("ws_status", serde_json::json!({ "connected": false }));
             }
             Err(e) => {
@@ -899,7 +968,7 @@ async fn run_ws_loop(
                     "log",
                     LogEvent {
                         level: "warning".into(),
-                        message: format!("WS connect failed: {e}. Retrying in 5s..."),
+                        message: format!("Socket.io connect failed: {e}. Retrying in 5s..."),
                     },
                 );
             }
@@ -913,8 +982,13 @@ async fn run_ws_loop(
     }
 
     // Final cleanup
-    let mut ws_tx = state.ws_tx.lock().unwrap();
-    *ws_tx = None;
+    state.sio_connected.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = state.sio_client.lock() {
+        *guard = None;
+    }
+    if let Ok(mut lp) = state.last_sent_player.lock() {
+        *lp = None;
+    }
 }
 
 async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
@@ -1037,46 +1111,25 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
             }
         };
 
-        // Match results against player names
-        let matcher_guard = state.matcher.lock().unwrap();
-        let mut detections = Vec::new();
+        // Match results against player names (scoped to drop MutexGuard before await)
+        let detections = {
+            let matcher_guard = state.matcher.lock().unwrap();
+            let mut dets = Vec::new();
 
-        for result in &results {
-            if result.confidence >= confidence_threshold {
-                let matched =
-                    matcher_guard.find_match(&result.text, result.confidence as f64);
-
-                let level = if matched.matched_name.is_some() {
-                    "success"
-                } else {
-                    "info"
-                };
-                let _ = app.emit(
-                    "log",
-                    LogEvent {
-                        level: level.into(),
-                        message: format!(
-                            "\"{}\" → {} (conf: {:.0}%, fuzz: {:.0})",
-                            result.text,
-                            matched
-                                .matched_name
-                                .as_deref()
-                                .unwrap_or("No match"),
-                            result.confidence * 100.0,
-                            matched.match_score
-                        ),
-                    },
-                );
-
-                detections.push(matched);
+            for result in &results {
+                if result.confidence >= confidence_threshold {
+                    let matched =
+                        matcher_guard.find_match(&result.text, result.confidence as f64);
+                    dets.push(matched);
+                }
             }
-        }
-        drop(matcher_guard);
+            dets
+        };
 
         // Send preview with detections
         send_preview(&app, &preview_b64, &detections);
 
-        // Send OCR result to server via WebSocket
+        // Send OCR result to server via Socket.io
         {
             let best_match = detections
                 .iter()
@@ -1087,36 +1140,68 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                         .unwrap_or(std::cmp::Ordering::Equal)
                 });
 
-            if let Ok(ws_tx_guard) = state.ws_tx.lock() {
-                if let Some(tx) = ws_tx_guard.as_ref() {
-                    let msg = if let Some(det) = best_match {
-                        // Look up player ID from fetched_players by IGN
-                        let player_id = {
-                            let fp = state.fetched_players.lock().unwrap();
-                            fp.iter()
-                                .find(|p| {
-                                    p.ign.to_lowercase()
-                                        == det
-                                            .matched_name
-                                            .as_deref()
-                                            .unwrap_or("")
-                                            .to_lowercase()
-                                })
-                                .map(|p| p.id.clone())
-                        };
-                        match player_id {
-                            Some(pid) => serde_json::json!({
-                                "type": "playerDetected",
-                                "playerId": pid
-                            })
-                            .to_string(),
-                            // IGN matched but player not in fetched list — send noMatch
-                            None => serde_json::json!({ "type": "noMatch" }).to_string(),
-                        }
-                    } else {
-                        serde_json::json!({ "type": "noMatch" }).to_string()
-                    };
-                    let _ = tx.send(msg);
+            // Resolve current detected player ID (or None for noMatch)
+            let current_player_id: Option<String> = best_match.and_then(|det| {
+                let fp = state.fetched_players.lock().unwrap();
+                fp.iter()
+                    .find(|p| {
+                        p.ign.to_lowercase()
+                            == det
+                                .matched_name
+                                .as_deref()
+                                .unwrap_or("")
+                                .to_lowercase()
+                    })
+                    .map(|p| p.id.clone())
+            });
+
+            // Log only when detected player changes (reduce log noise)
+            let log_changed = {
+                let last = state.last_sent_player.lock().unwrap();
+                *last != current_player_id
+            };
+
+            if log_changed {
+                let matched_name = best_match
+                    .and_then(|d| d.matched_name.as_deref())
+                    .unwrap_or("No match");
+                let raw_text = best_match
+                    .map(|d| d.raw_text.as_str())
+                    .unwrap_or("—");
+                let confidence = best_match.map(|d| d.confidence).unwrap_or(0.0);
+                let fuzz = best_match.map(|d| d.match_score).unwrap_or(0.0);
+
+                let level = if current_player_id.is_some() { "success" } else { "info" };
+                let _ = app.emit(
+                    "log",
+                    LogEvent {
+                        level: level.into(),
+                        message: format!(
+                            "\"{}\" → {} (conf: {:.0}%, fuzz: {:.0})",
+                            raw_text, matched_name, confidence * 100.0, fuzz
+                        ),
+                    },
+                );
+
+                if let Ok(mut last) = state.last_sent_player.lock() {
+                    *last = current_player_id.clone();
+                }
+            }
+
+            // Always send to server — server dedup prevents unnecessary broadcasts.
+            // We can't dedup here because manual clicks may change activePlayerId
+            // on the server without OCR knowing.
+            let client_opt = state.sio_client.lock().ok().and_then(|g| g.clone());
+            if let Some(client) = client_opt {
+                match &current_player_id {
+                    Some(pid) => {
+                        let _ = client
+                            .emit("playerDetected", serde_json::json!({ "playerId": pid }))
+                            .await;
+                    }
+                    None => {
+                        let _ = client.emit("noMatch", serde_json::json!({})).await;
+                    }
                 }
             }
         }
@@ -1392,9 +1477,11 @@ pub fn run() {
 
             app.manage(Arc::new(OcrState {
                 running: AtomicBool::new(false),
+                sio_connected: AtomicBool::new(false),
                 matcher: Mutex::new(matcher::FuzzyMatcher::new(players, threshold)),
                 fetched_players: Mutex::new(Vec::new()),
-                ws_tx: Mutex::new(None),
+                sio_client: Mutex::new(None),
+                last_sent_player: Mutex::new(None),
             }));
 
             app.manage(Arc::new(RegionSelectorState {

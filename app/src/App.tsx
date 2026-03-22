@@ -143,7 +143,7 @@ function App() {
       </header>
 
       {/* ── Page Content ────────────────────────── */}
-      <main style={{ flex: 1, overflow: "auto", position: "relative" }}>
+      <main style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {currentPage === "dashboard" && <Dashboard />}
         {currentPage === "players" && <PlayerNames />}
         {currentPage === "settings" && <Settings />}
