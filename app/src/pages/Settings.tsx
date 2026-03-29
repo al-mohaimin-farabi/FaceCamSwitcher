@@ -27,6 +27,9 @@ import {
   Users,
   Download,
   Hash,
+  Layers,
+  Crosshair,
+  FolderOpen,
 } from "lucide-react";
 
 export default function Settings() {
@@ -257,6 +260,100 @@ export default function Settings() {
         </div>
       </div>
 
+      {/* ── App Mode Toggle ─────────── */}
+      <div
+        className="glass-card"
+        style={{
+          padding: "16px 24px",
+          display: "flex",
+          alignItems: "center",
+          justifyContent: "space-between",
+        }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+          <Layers size={16} style={{ color: "var(--accent)" }} />
+          <div>
+            <span
+              style={{
+                fontSize: 14,
+                fontWeight: 700,
+                color: "var(--text-bright)",
+              }}>
+              Application Mode
+            </span>
+            <p
+              style={{
+                fontSize: 11,
+                color: "var(--text-muted)",
+                marginTop: 2,
+              }}>
+              {config.app_mode === "player_detection"
+                ? "Detects player names via OCR and matches to database"
+                : "Captures data from multiple screen regions"}
+            </p>
+          </div>
+        </div>
+        <div
+          style={{
+            display: "flex",
+            gap: 4,
+            padding: 3,
+            background: "var(--bg-input)",
+            borderRadius: 10,
+            border: "1px solid var(--border)",
+          }}>
+          <button
+            onClick={() => updateConfig("app_mode", "player_detection")}
+            style={{
+              height: 32,
+              padding: "0 14px",
+              borderRadius: 7,
+              border: "none",
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background:
+                config.app_mode === "player_detection"
+                  ? "var(--accent)"
+                  : "transparent",
+              color:
+                config.app_mode === "player_detection"
+                  ? "#fff"
+                  : "var(--text-muted)",
+            }}>
+            <Crosshair size={13} />
+            Player Detection
+          </button>
+          <button
+            onClick={() => updateConfig("app_mode", "multi_region")}
+            style={{
+              height: 32,
+              padding: "0 14px",
+              borderRadius: 7,
+              border: "none",
+              cursor: "pointer",
+              fontSize: 12,
+              fontWeight: 600,
+              display: "flex",
+              alignItems: "center",
+              gap: 6,
+              background:
+                config.app_mode === "multi_region"
+                  ? "var(--cyan)"
+                  : "transparent",
+              color:
+                config.app_mode === "multi_region"
+                  ? "#fff"
+                  : "var(--text-muted)",
+            }}>
+            <Layers size={13} />
+            Multi-Region
+          </button>
+        </div>
+      </div>
+
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
         {/* ── OCR Parameters ────────────── */}
         <div
@@ -318,38 +415,40 @@ export default function Settings() {
               />
             </div>
 
-            <div className="input-group">
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: 6,
-                }}>
-                <label>Fuzzy Match Sensitivity</label>
-                <span
+            {config.app_mode === "player_detection" && (
+              <div className="input-group">
+                <div
                   style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: "var(--cyan)",
+                    display: "flex",
+                    justifyContent: "space-between",
+                    marginBottom: 6,
                   }}>
-                  {config.ocr.fuzzy_match_threshold}%
-                </span>
+                  <label>Fuzzy Match Sensitivity</label>
+                  <span
+                    style={{
+                      fontSize: 11,
+                      fontWeight: 700,
+                      color: "var(--cyan)",
+                    }}>
+                    {config.ocr.fuzzy_match_threshold}%
+                  </span>
+                </div>
+                <input
+                  type="range"
+                  min="30"
+                  max="100"
+                  step="5"
+                  value={config.ocr.fuzzy_match_threshold}
+                  onChange={(e) =>
+                    updateConfig(
+                      "ocr.fuzzy_match_threshold",
+                      parseInt(e.target.value),
+                    )
+                  }
+                  style={{ width: "100%", accentColor: "var(--cyan)" }}
+                />
               </div>
-              <input
-                type="range"
-                min="30"
-                max="100"
-                step="5"
-                value={config.ocr.fuzzy_match_threshold}
-                onChange={(e) =>
-                  updateConfig(
-                    "ocr.fuzzy_match_threshold",
-                    parseInt(e.target.value),
-                  )
-                }
-                style={{ width: "100%", accentColor: "var(--cyan)" }}
-              />
-            </div>
+            )}
 
             <div
               style={{
@@ -403,7 +502,7 @@ export default function Settings() {
           </div>
         </div>
 
-        {/* ── Network Configuration ─────────── */}
+        {/* ── Network Sync ─────────────────────────────────────────── */}
         <div
           className="glass-card"
           style={{
@@ -412,84 +511,310 @@ export default function Settings() {
             flexDirection: "column",
             gap: 20,
           }}>
-          {/* Header + WS status badge */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}>
-            <div className="section-header" style={{ marginBottom: 0 }}>
-              <Globe size={16} className="icon" /> Network Sync
-            </div>
+            {/* Header + WS status badge */}
             <div
               style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "4px 10px",
-                borderRadius: 8,
-                fontSize: 11,
-                fontWeight: 700,
-                background: wsConnected
-                  ? "rgba(34,197,94,0.1)"
-                  : "rgba(255,255,255,0.04)",
-                border: `1px solid ${wsConnected ? "rgba(34,197,94,0.3)" : "var(--border)"}`,
-                color: wsConnected ? "var(--green)" : "var(--text-muted)",
-              }}>
-              {wsConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
-              {wsConnected ? "WS Connected" : "WS Offline"}
-            </div>
-          </div>
-
-          <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* Enable/disable toggle */}
-            <div
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                background: config.server.enabled
-                  ? "rgba(34,197,94,0.06)"
-                  : "rgba(255,255,255,0.03)",
-                border: `1px solid ${config.server.enabled ? "rgba(34,197,94,0.25)" : "var(--border)"}`,
                 display: "flex",
                 alignItems: "center",
                 justifyContent: "space-between",
               }}>
-              <div>
-                <span
+              <div className="section-header" style={{ marginBottom: 0 }}>
+                <Globe size={16} className="icon" /> Network Sync
+              </div>
+              <div
+                style={{
+                  display: "flex",
+                  alignItems: "center",
+                  gap: 6,
+                  padding: "4px 10px",
+                  borderRadius: 8,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  background: wsConnected
+                    ? "rgba(34,197,94,0.1)"
+                    : "rgba(255,255,255,0.04)",
+                  border: `1px solid ${wsConnected ? "rgba(34,197,94,0.3)" : "var(--border)"}`,
+                  color: wsConnected ? "var(--green)" : "var(--text-muted)",
+                }}>
+                {wsConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
+                {wsConnected ? "WS Connected" : "WS Offline"}
+              </div>
+            </div>
+
+            {!config.vmix_pull?.enabled && <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
+              {/* Enable/disable toggle */}
+              <div
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  background: config.server.enabled
+                    ? "rgba(34,197,94,0.06)"
+                    : "rgba(255,255,255,0.03)",
+                  border: `1px solid ${config.server.enabled ? "rgba(34,197,94,0.25)" : "var(--border)"}`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}>
+                <div>
+                  <span
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: config.server.enabled
+                        ? "var(--green)"
+                        : "var(--text-secondary)",
+                    }}>
+                    OCR Bridge Enabled
+                  </span>
+                  <p
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-muted)",
+                      marginTop: 2,
+                    }}>
+                    {config.server.enabled
+                      ? "Connects to server via Socket.io on OCR start"
+                      : "Disabled — OCR runs locally only"}
+                  </p>
+                </div>
+                <div
+                  onClick={() =>
+                    updateConfig("server.enabled", !config.server.enabled)
+                  }
                   style={{
-                    fontSize: 13,
-                    fontWeight: 600,
-                    color: config.server.enabled
+                    width: 36,
+                    height: 20,
+                    borderRadius: 10,
+                    flexShrink: 0,
+                    background: config.server.enabled
                       ? "var(--green)"
-                      : "var(--text-secondary)",
+                      : "rgba(255,255,255,0.1)",
+                    position: "relative",
+                    cursor: "pointer",
                   }}>
-                  OCR Bridge Enabled
+                  <div
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: "50%",
+                      background: "white",
+                      position: "absolute",
+                      top: 3,
+                      left: config.server.enabled ? 19 : 3,
+                    }}
+                  />
+                </div>
+              </div>
+
+              <div
+                style={{
+                  display: "flex",
+                  flexDirection: "column",
+                  gap: 16,
+                  opacity: config.server.enabled ? 1 : 0.45,
+                  pointerEvents: config.server.enabled ? "auto" : "none",
+                }}>
+                {/* API Base URL */}
+                <div className="input-group">
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Globe size={12} style={{ color: "var(--text-muted)" }} />
+                    API Base URL
+                  </label>
+                  <input
+                    className="input"
+                    type="text"
+                    value={config.server.api_url}
+                    onChange={(e) =>
+                      updateConfig("server.api_url", e.target.value)
+                    }
+                    placeholder={
+                      import.meta.env.VITE_API_URL || "https://api.example.com"
+                    }
+                  />
+                </div>
+
+                {/* Socket.io Server URL */}
+                <div className="input-group">
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Wifi size={12} style={{ color: "var(--text-muted)" }} />
+                    Socket.io URL
+                  </label>
+                  <input
+                    className="input"
+                    type="text"
+                    value={config.server.ws_url}
+                    onChange={(e) =>
+                      updateConfig("server.ws_url", e.target.value)
+                    }
+                    placeholder={
+                      import.meta.env.VITE_WS_URL || "https://api.example.com"
+                    }
+                  />
+                </div>
+
+                {/* Tournament ID */}
+                <div className="input-group">
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Hash size={12} style={{ color: "var(--text-muted)" }} />
+                    Tournament ID
+                  </label>
+                  <input
+                    className="input"
+                    type="text"
+                    value={config.server.tournament_id}
+                    onChange={(e) =>
+                      updateConfig("server.tournament_id", e.target.value)
+                    }
+                    placeholder="e.g. clx1abc23def456"
+                  />
+                </div>
+
+                {/* Secret Key */}
+                <div className="input-group">
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Key size={12} style={{ color: "var(--text-muted)" }} />
+                    Secret Key
+                  </label>
+                  <input
+                    className="input"
+                    type="password"
+                    value={config.server.secret_key}
+                    onChange={(e) =>
+                      updateConfig("server.secret_key", e.target.value)
+                    }
+                    placeholder="64-character OCR secret"
+                  />
+                </div>
+
+                {/* Server status badge */}
+                {serverOnline !== null && (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "center",
+                      gap: 6,
+                      padding: "6px 12px",
+                      borderRadius: 8,
+                      background: serverOnline
+                        ? "rgba(34,197,94,0.08)"
+                        : "rgba(239,68,68,0.08)",
+                      border: `1px solid ${serverOnline ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"}`,
+                      fontSize: 11,
+                      fontWeight: 600,
+                      color: serverOnline ? "var(--green)" : "#ef4444",
+                    }}>
+                    <div
+                      style={{
+                        width: 7,
+                        height: 7,
+                        borderRadius: "50%",
+                        background: serverOnline ? "#22c55e" : "#ef4444",
+                      }}
+                    />
+                    Tournament Server {serverOnline ? "Online" : "Offline"}
+                  </div>
+                )}
+
+                {/* Fetch Players button + count badge */}
+                <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
+                  <button
+                    className="btn btn-primary"
+                    onClick={handleFetchPlayers}
+                    disabled={
+                      isFetchingPlayers ||
+                      !config.server.tournament_id ||
+                      !config.server.secret_key ||
+                      !config.server.api_url
+                    }
+                    style={{ height: 36, borderRadius: 8, fontSize: 12 }}>
+                    {isFetchingPlayers ? (
+                      <RefreshCw size={13} className="animate-spin" />
+                    ) : (
+                      <Download size={13} />
+                    )}
+                    Fetch Players
+                  </button>
+                  {fetchedPlayerCount > 0 && (
+                    <div
+                      style={{
+                        display: "flex",
+                        alignItems: "center",
+                        gap: 5,
+                        padding: "4px 10px",
+                        borderRadius: 8,
+                        background: "rgba(59,130,246,0.08)",
+                        border: "1px solid rgba(59,130,246,0.2)",
+                        color: "var(--accent)",
+                        fontSize: 11,
+                        fontWeight: 700,
+                      }}>
+                      <Users size={12} />
+                      {fetchedPlayerCount} players loaded
+                    </div>
+                  )}
+                </div>
+
+                {/* API error message */}
+                {fetchError && (
+                  <div
+                    style={{
+                      display: "flex",
+                      alignItems: "flex-start",
+                      gap: 8,
+                      padding: "8px 12px",
+                      borderRadius: 8,
+                      background: "rgba(239,68,68,0.08)",
+                      border: "1px solid rgba(239,68,68,0.2)",
+                      color: "#ef4444",
+                      fontSize: 11,
+                      fontWeight: 500,
+                      lineHeight: 1.4,
+                    }}>
+                    <AlertCircle
+                      size={14}
+                      style={{ flexShrink: 0, marginTop: 1 }}
+                    />
+                    {fetchError}
+                  </div>
+                )}
+              </div>
+            </div>}
+
+          {/* ── vMix Pull ─── */}
+          <div style={{ borderTop: "1px solid var(--border)", paddingTop: 20, display: "flex", flexDirection: "column", gap: 16 }}>
+            <div
+              style={{
+                padding: "12px 14px",
+                borderRadius: 12,
+                background: config.vmix_pull?.enabled ? "rgba(96,165,250,0.06)" : "rgba(255,255,255,0.03)",
+                border: `1px solid ${config.vmix_pull?.enabled ? "rgba(96,165,250,0.25)" : "var(--border)"}`,
+                display: "flex",
+                alignItems: "center",
+                justifyContent: "space-between",
+                gap: 12,
+              }}>
+              <div>
+                <span style={{ fontSize: 13, fontWeight: 600, color: config.vmix_pull?.enabled ? "var(--accent)" : "var(--text-secondary)" }}>
+                  vMix Pull Mode
                 </span>
-                <p
-                  style={{
-                    fontSize: 11,
-                    color: "var(--text-muted)",
-                    marginTop: 2,
-                  }}>
-                  {config.server.enabled
-                    ? "Connects to server via Socket.io on OCR start"
-                    : "Disabled — OCR runs locally only"}
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 2 }}>
+                  {config.vmix_pull?.enabled
+                    ? "Writing OCR data to JSON file — vMix GT Title reads on interval"
+                    : "Disabled — OCR data not written to file"}
                 </p>
               </div>
               <div
-                onClick={() =>
-                  updateConfig("server.enabled", !config.server.enabled)
-                }
+                onClick={() => updateConfig("vmix_pull.enabled", !config.vmix_pull?.enabled)}
                 style={{
                   width: 36,
                   height: 20,
                   borderRadius: 10,
                   flexShrink: 0,
-                  background: config.server.enabled
-                    ? "var(--green)"
-                    : "rgba(255,255,255,0.1)",
+                  background: config.vmix_pull?.enabled ? "var(--accent)" : "rgba(255,255,255,0.1)",
                   position: "relative",
                   cursor: "pointer",
                 }}>
@@ -501,188 +826,45 @@ export default function Settings() {
                     background: "white",
                     position: "absolute",
                     top: 3,
-                    left: config.server.enabled ? 19 : 3,
+                    left: config.vmix_pull?.enabled ? 19 : 3,
                   }}
                 />
               </div>
             </div>
 
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 16,
-                opacity: config.server.enabled ? 1 : 0.45,
-                pointerEvents: config.server.enabled ? "auto" : "none",
-              }}>
-              {/* API Base URL */}
+            {config.vmix_pull?.enabled && (
               <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Globe size={12} style={{ color: "var(--text-muted)" }} />
-                  API Base URL
+                <label style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                  <FolderOpen size={12} style={{ color: "var(--text-muted)" }} />
+                  Output JSON File Path
                 </label>
-                <input
-                  className="input"
-                  type="text"
-                  value={config.server.api_url}
-                  onChange={(e) =>
-                    updateConfig("server.api_url", e.target.value)
-                  }
-                  placeholder={
-                    import.meta.env.VITE_API_URL || "https://api.example.com"
-                  }
-                />
-              </div>
-
-              {/* Socket.io Server URL */}
-              <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Wifi size={12} style={{ color: "var(--text-muted)" }} />
-                  Socket.io URL
-                </label>
-                <input
-                  className="input"
-                  type="text"
-                  value={config.server.ws_url}
-                  onChange={(e) =>
-                    updateConfig("server.ws_url", e.target.value)
-                  }
-                  placeholder={
-                    import.meta.env.VITE_WS_URL || "https://api.example.com"
-                  }
-                />
-              </div>
-
-              {/* Tournament ID */}
-              <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Hash size={12} style={{ color: "var(--text-muted)" }} />
-                  Tournament ID
-                </label>
-                <input
-                  className="input"
-                  type="text"
-                  value={config.server.tournament_id}
-                  onChange={(e) =>
-                    updateConfig("server.tournament_id", e.target.value)
-                  }
-                  placeholder="e.g. clx1abc23def456"
-                />
-              </div>
-
-              {/* Secret Key */}
-              <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Key size={12} style={{ color: "var(--text-muted)" }} />
-                  Secret Key
-                </label>
-                <input
-                  className="input"
-                  type="password"
-                  value={config.server.secret_key}
-                  onChange={(e) =>
-                    updateConfig("server.secret_key", e.target.value)
-                  }
-                  placeholder="64-character OCR secret"
-                />
-              </div>
-
-              {/* Server status badge */}
-              {serverOnline !== null && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "6px 12px",
-                    borderRadius: 8,
-                    background: serverOnline
-                      ? "rgba(34,197,94,0.08)"
-                      : "rgba(239,68,68,0.08)",
-                    border: `1px solid ${serverOnline ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"}`,
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: serverOnline ? "var(--green)" : "#ef4444",
-                  }}>
-                  <div
-                    style={{
-                      width: 7,
-                      height: 7,
-                      borderRadius: "50%",
-                      background: serverOnline ? "#22c55e" : "#ef4444",
-                    }}
+                <div style={{ display: "flex", gap: 8 }}>
+                  <input
+                    className="input"
+                    type="text"
+                    placeholder="e.g. C:\vmix\data.json"
+                    value={config.vmix_pull?.output_path ?? ""}
+                    onChange={(e) => updateConfig("vmix_pull.output_path", e.target.value)}
+                    style={{ flex: 1, fontFamily: '"Cascadia Code", "Consolas", monospace', fontSize: 12 }}
                   />
-                  Tournament Server {serverOnline ? "Online" : "Offline"}
-                </div>
-              )}
-
-              {/* Fetch Players button + count badge */}
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={handleFetchPlayers}
-                  disabled={
-                    isFetchingPlayers ||
-                    !config.server.tournament_id ||
-                    !config.server.secret_key ||
-                    !config.server.api_url
-                  }
-                  style={{ height: 36, borderRadius: 8, fontSize: 12 }}>
-                  {isFetchingPlayers ? (
-                    <RefreshCw size={13} className="animate-spin" />
-                  ) : (
-                    <Download size={13} />
-                  )}
-                  Fetch Players
-                </button>
-                {fetchedPlayerCount > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 5,
-                      padding: "4px 10px",
-                      borderRadius: 8,
-                      background: "rgba(59,130,246,0.08)",
-                      border: "1px solid rgba(59,130,246,0.2)",
-                      color: "var(--accent)",
-                      fontSize: 11,
-                      fontWeight: 700,
+                  <button
+                    className="btn"
+                    style={{ height: 40, padding: "0 14px", borderRadius: 10, display: "flex", alignItems: "center", gap: 6, flexShrink: 0, fontSize: 12 }}
+                    onClick={async () => {
+                      const folder = await invoke<string | null>("pick_folder");
+                      if (folder) {
+                        const sep = folder.endsWith("\\") || folder.endsWith("/") ? "" : "\\";
+                        updateConfig("vmix_pull.output_path", `${folder}${sep}vmix_data.json`);
+                      }
                     }}>
-                    <Users size={12} />
-                    {fetchedPlayerCount} players loaded
-                  </div>
-                )}
-              </div>
-
-              {/* API error message */}
-              {fetchError && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 8,
-                    padding: "8px 12px",
-                    borderRadius: 8,
-                    background: "rgba(239,68,68,0.08)",
-                    border: "1px solid rgba(239,68,68,0.2)",
-                    color: "#ef4444",
-                    fontSize: 11,
-                    fontWeight: 500,
-                    lineHeight: 1.4,
-                  }}>
-                  <AlertCircle
-                    size={14}
-                    style={{ flexShrink: 0, marginTop: 1 }}
-                  />
-                  {fetchError}
+                    <FolderOpen size={13} /> Browse
+                  </button>
                 </div>
-              )}
-            </div>
+                <p style={{ fontSize: 11, color: "var(--text-muted)", marginTop: 4 }}>
+                  Overwritten on every region value change. Point vMix GT Title to this file.
+                </p>
+              </div>
+            )}
           </div>
         </div>
 
@@ -728,6 +910,24 @@ export default function Settings() {
                   style={{ paddingLeft: 34 }}
                 />
               </div>
+            </div>
+
+            <div className="input-group">
+              <label>OCR Upscale Factor</label>
+              <input
+                className="input"
+                type="number"
+                step="1"
+                min="1"
+                max="8"
+                value={config.capture.ocr_upscale_factor ?? 3}
+                onChange={(e) =>
+                  updateConfig(
+                    "capture.ocr_upscale_factor",
+                    parseInt(e.target.value) || 3,
+                  )
+                }
+              />
             </div>
 
             <div
@@ -822,6 +1022,7 @@ export default function Settings() {
             </div>
           </div>
         </div>
+
       </div>
     </div>
   );

@@ -14,6 +14,12 @@ use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{interval, Duration};
 
+// ── Constants ────────────────────────────────────────────────────────
+
+/// Consecutive bad-read count before a region value is cleared to its default.
+/// Shared by both single-player OCR and multi-region mode.
+const NO_MATCH_THRESHOLD: u32 = 3;
+
 // ── State ────────────────────────────────────────────────────────────
 
 /// A player fetched from the server API (replaces Players Name.txt when server sync is enabled).
@@ -42,6 +48,18 @@ struct OcrState {
     no_match_streak: Mutex<u32>,
 }
 
+/// State for multi-region OCR mode .
+/// Completely separate from OcrState — no shared mutable state.
+struct MultiRegionState {
+    running: AtomicBool,
+    /// Last known good value for each region (keyed by region name).
+    /// Used for change-only logging: only emit when a value differs from the previous scan.
+    last_values: Mutex<std::collections::HashMap<String, String>>,
+    /// Consecutive bad-read count per region. Reset to 0 on a valid read.
+    /// When it reaches NO_MATCH_THRESHOLD the region value falls back to its type default.
+    mismatch_counts: Mutex<std::collections::HashMap<String, u32>>,
+}
+
 /// Holds captured image data for the region selector overlay window.
 struct RegionSelectorState {
     image_b64: Mutex<Option<String>>,
@@ -53,6 +71,8 @@ struct RegionSelectorState {
     source_hwnd: Mutex<i64>,
     /// Camera index (for camera mode)
     source_camera: Mutex<u32>,
+    /// When Some(name), save_selected_region writes to multi_region.regions instead of input_source.
+    pending_mr_region: Mutex<Option<String>>,
 }
 
 #[derive(Clone, Serialize)]
@@ -139,21 +159,258 @@ struct OcrConfig {
     use_gpu: bool,
 }
 
+fn default_ocr_upscale() -> u32 { 3 }
+
 #[derive(Serialize, Deserialize, Clone)]
 struct CaptureConfig {
     interval_seconds: f64,
     save_debug_screenshots: bool,
     debug_screenshot_dir: String,
+    /// Upscale factor for OCR preprocessing (default 3×).
+    /// Higher = better accuracy for small text, more CPU.
+    #[serde(default = "default_ocr_upscale")]
+    ocr_upscale_factor: u32,
+}
+
+/// A named OCR region for multi-region mode.
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct OcrRegion {
+    /// JSON-safe key name (no spaces, valid identifier).
+    name: String,
+    left: i32,
+    top: i32,
+    width: i32,
+    height: i32,
+    /// Sanitization type applied to raw OCR output before emitting.
+    /// "none" | "num2" | "num4k" | "mmss" | "text"
+    #[serde(default)]
+    sanitization_type: String,
+}
+
+#[derive(Serialize, Deserialize, Clone, Debug)]
+struct MultiRegionConfig {
+    #[serde(default)]
+    regions: Vec<OcrRegion>,
+}
+
+impl Default for MultiRegionConfig {
+    fn default() -> Self {
+        Self { regions: Vec::new() }
+    }
+}
+
+fn default_app_mode() -> String {
+    "player_detection".to_string()
+}
+
+/// Configuration for vMix Pull mode — writes a JSON file that vMix GT Title reads.
+#[derive(Serialize, Deserialize, Clone, Debug, Default)]
+struct VmixPullConfig {
+    #[serde(default)]
+    enabled: bool,
+    /// Absolute path to the output JSON file (e.g. C:\vmix\data.json).
+    #[serde(default)]
+    output_path: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
 struct AppConfig {
+    /// "player_detection" or "multi_region"
+    #[serde(default = "default_app_mode")]
+    app_mode: String,
     input_source: InputSource,
     server: ServerConfig,
     ocr: OcrConfig,
     capture: CaptureConfig,
     #[serde(default)]
     saved_regions: std::collections::HashMap<String, WindowRegion>,
+    #[serde(default)]
+    multi_region: MultiRegionConfig,
+    #[serde(default)]
+    vmix_pull: VmixPullConfig,
+}
+
+// ── Sanitization ─────────────────────────────────────────────────────
+
+/// OCR confusion map for numeric contexts.
+/// Maps commonly-misread characters to their intended digit/symbol.
+fn ocr_clean_numeric(raw: &str) -> String {
+    raw.chars()
+        .map(|c| match c {
+            // Letter → digit confusions (from matcher.rs CONFUSION_GROUPS + numeric extras)
+            'O' | 'o' | 'Q' | 'D' => '0',
+            'I' | 'l' | '|' | '!' => '1',
+            'Z' | 'z' => '2',
+            'S' | 's' | '$' => '5',
+            'B' => '8',
+            'G' => '6',
+            'b' => '6',                  // lowercase b → 6
+            'q' => '9',                  // lowercase q → 9
+            'A' => '4',                  // A → 4 (common in game fonts)
+            // Preserve valid numeric chars
+            '0'..='9' | '.' | ',' | 'k' | 'K' | '-' | ' ' => c,
+            // Everything else dropped
+            _ => '\0',
+        })
+        .filter(|c| *c != '\0')
+        .collect()
+}
+
+/// Format a numeric value as a num4k output string.
+/// ≤ 9999 → zero-padded 4 digits, > 9999 → compact K.
+fn format_num4k(n: u64) -> String {
+    if n > 9999 {
+        let k = n as f64 / 1000.0;
+        if (k * 10.0).round() % 10.0 == 0.0 {
+            format!("{:.0}K", k)
+        } else {
+            format!("{:.1}K", k)
+        }
+    } else {
+        format!("{:04}", n)
+    }
+}
+
+/// Try multiple parsing strategies on a cleaned OCR string for num4k.
+///
+/// Strategies (in order of priority):
+/// 1. **K-notation with decimal**: "11.4k" → 11400 → "11.4K"
+/// 2. **K-notation no decimal** (OCR dropped the dot): "114k" → try 11.4K
+///    (insert dot at each position, pick the most plausible one)
+/// 3. **Plain integer**: "9999" → "9999"
+/// 4. **Plain digits that could be K** (OCR dropped the K): "114" with > 2 digits
+///    before context decides — for now treat as plain integer
+fn parse_num4k(cleaned: &str) -> (String, bool) {
+    let trimmed = cleaned.trim();
+    if trimmed.is_empty() {
+        return (String::new(), false);
+    }
+
+    let lower = trimmed.to_lowercase();
+    // Strip spaces within the value (OCR sometimes inserts spaces: "11 .4k")
+    let compact: String = lower.chars().filter(|c| !c.is_whitespace()).collect();
+
+    let has_k = compact.contains('k');
+
+    if has_k {
+        // Split at 'k' — take everything before the first 'k'
+        let before_k = compact.split('k').next().unwrap_or("");
+
+        // Strategy 1: direct parse (handles "11.4", "15,3", "10", "16.")
+        if let Some(result) = try_parse_k_value(before_k) {
+            return result;
+        }
+
+        // Strategy 2: OCR dropped the decimal point → "114k" should be "11.4k"
+        // Try inserting a dot at each plausible position
+        let digits: String = before_k.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.len() >= 3 {
+            // Try all dot insertion points and collect valid parses
+            let mut candidates: Vec<(String, f64)> = Vec::new();
+            for dot_pos in 1..digits.len() {
+                let with_dot = format!("{}.{}", &digits[..dot_pos], &digits[dot_pos..]);
+                if let Ok(n) = with_dot.parse::<f64>() {
+                    if n >= 0.0 && n < 100.0 {
+                        let total = (n * 1000.0).round() as u64;
+                        candidates.push((format_num4k(total), n));
+                    }
+                }
+            }
+            // Prefer the parse where the integer part is the longest (most natural reading)
+            // e.g., "114" → "11.4" (2 integer digits) beats "1.14" (1 integer digit)
+            if let Some(best) = candidates.last() {
+                return (best.0.clone(), true);
+            }
+        }
+
+        // Strategy 3: maybe just digits before k, like "11k"
+        if let Ok(n) = digits.parse::<u64>() {
+            if n < 100 {
+                return (format_num4k(n * 1000), true);
+            }
+        }
+
+        (String::new(), false)
+    } else {
+        // No K — plain integer
+        let digits: String = compact.chars().filter(|c| c.is_ascii_digit()).collect();
+        if digits.is_empty() {
+            return (String::new(), false);
+        }
+        let n: u64 = digits.parse().unwrap_or(0);
+        (format_num4k(n), true)
+    }
+}
+
+/// Try to parse the string before 'k' as a decimal K-value.
+/// Handles: "11.4", "15,3", "10", "16.", "11 .4" (after space-strip).
+fn try_parse_k_value(before_k: &str) -> Option<(String, bool)> {
+    if before_k.is_empty() {
+        return None;
+    }
+    // Normalise comma → dot, strip trailing dot
+    let normalised = before_k.replace(',', ".");
+    let normalised = normalised.trim_end_matches('.');
+    if normalised.is_empty() {
+        return None;
+    }
+    match normalised.parse::<f64>() {
+        Ok(n) if n >= 0.0 && n < 100.0 => {
+            let total = (n * 1000.0).round() as u64;
+            Some((format_num4k(total), true))
+        }
+        _ => None,
+    }
+}
+
+/// Apply the configured sanitization type to a raw OCR string.
+/// Returns `(sanitized_value, is_valid)`.
+/// `is_valid` is false when the raw text does not contain data that matches
+/// the expected format (e.g. letters where digits are required). In that
+/// case the caller should apply the NO_MATCH_THRESHOLD logic before
+/// deciding what value to emit.
+fn sanitize_value(raw: &str, san_type: &str) -> (String, bool) {
+    match san_type {
+        "num2" => {
+            let cleaned = ocr_clean_numeric(raw);
+            let digits: String = cleaned.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                return (String::new(), false);
+            }
+            let n: u64 = digits.parse().unwrap_or(0);
+            (format!("{:02}", n.min(99)), true)
+        }
+        "num4k" => {
+            // Apply OCR confusion fixes first, then try multiple parse strategies.
+            let cleaned = ocr_clean_numeric(raw);
+            parse_num4k(&cleaned)
+        }
+        "mmss" => {
+            let cleaned = ocr_clean_numeric(raw);
+            let digits: String = cleaned.chars().filter(|c| c.is_ascii_digit()).collect();
+            if digits.is_empty() {
+                return (String::new(), false);
+            }
+            // Take up to 4 leading digits and left-pad to exactly 4 → "MMSS"
+            let clamped: String = digits.chars().take(4).collect();
+            let padded = format!("{:0>4}", clamped);
+            let mm = &padded[0..2];
+            let ss = &padded[2..4];
+            (format!("{}:{}", mm, ss), true)
+        }
+        // "text", "none", "" or any unknown type — pass through unchanged, always valid
+        _ => (raw.trim().to_string(), true),
+    }
+}
+
+/// Return the type-appropriate default value used after NO_MATCH_THRESHOLD is exceeded.
+fn default_sanitized_value(san_type: &str) -> String {
+    match san_type {
+        "num2" => "00".to_string(),
+        "num4k" => "0000".to_string(),
+        "mmss" => "00:00".to_string(),
+        _ => String::new(),
+    }
 }
 
 // ── Helpers ──────────────────────────────────────────────────────────
@@ -174,6 +431,7 @@ fn ensure_default_config(dir: &PathBuf) {
     let config_path = dir.join("config.json");
     if !config_path.exists() {
         let default_config = r#"{
+  "app_mode": "player_detection",
   "input_source": {
     "type": "window",
     "window_hwnd": 0,
@@ -199,6 +457,9 @@ fn ensure_default_config(dir: &PathBuf) {
     "interval_seconds": 0.1,
     "save_debug_screenshots": false,
     "debug_screenshot_dir": ""
+  },
+  "multi_region": {
+    "regions": []
   }
 }"#;
         let _ = fs::write(&config_path, default_config);
@@ -1237,7 +1498,7 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
         let preview_b64 = capture::image_to_base64_jpeg(&img).unwrap_or_default();
 
         // Run OCR (blocking work — run on blocking thread pool)
-        let preprocessed = capture::preprocess_for_ocr(&img);
+        let preprocessed = capture::preprocess_for_ocr(&img, config.capture.ocr_upscale_factor);
         let ocr_results = tokio::task::spawn_blocking(move || ocr::run_ocr(&preprocessed)).await;
 
         let results = match ocr_results {
@@ -1310,10 +1571,8 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                     .map(|p| p.id.clone())
             });
 
-            // Anti-flicker: require 3 consecutive "no match" scans before sending noMatch.
+            // Anti-flicker: require NO_MATCH_THRESHOLD consecutive misses before sending noMatch.
             // This prevents brief OCR failures from clearing the active player.
-            const NO_MATCH_THRESHOLD: u32 = 3;
-
             let effective_player_id: Option<String> = if current_player_id.is_some() {
                 // Player detected — reset streak and use the ID
                 if let Ok(mut streak) = state.no_match_streak.lock() {
@@ -1438,6 +1697,248 @@ async fn stop_ocr(state: tauri::State<'_, Arc<OcrState>>) -> Result<CommandResul
     }
 }
 
+// ── Multi-Region OCR ───────────────────────────────────────────
+
+#[tauri::command]
+async fn start_multi_region_ocr(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<MultiRegionState>>,
+) -> Result<CommandResult, String> {
+    if state.running.swap(true, Ordering::SeqCst) {
+        return Err("Multi-region OCR already running".into());
+    }
+
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            state.running.store(false, Ordering::SeqCst);
+            return Err(format!("Failed to load config: {e}"));
+        }
+    };
+
+    if config.multi_region.regions.is_empty() {
+        state.running.store(false, Ordering::SeqCst);
+        return Err("No regions defined. Add regions first.".into());
+    }
+
+    // Clear previous values so first scan always logs
+    if let Ok(mut lv) = state.last_values.lock() {
+        lv.clear();
+    }
+
+    let state_arc = state.inner().clone();
+    let app_mr = app.clone();
+    tokio::spawn(async move {
+        run_multi_region_loop(app_mr, state_arc).await;
+    });
+
+    Ok(CommandResult {
+        success: true,
+        message: "Multi-region OCR started".into(),
+    })
+}
+
+#[tauri::command]
+async fn stop_multi_region_ocr(
+    state: tauri::State<'_, Arc<MultiRegionState>>,
+) -> Result<CommandResult, String> {
+    if state.running.swap(false, Ordering::SeqCst) {
+        Ok(CommandResult {
+            success: true,
+            message: "Multi-region OCR stopped".into(),
+        })
+    } else {
+        Ok(CommandResult {
+            success: false,
+            message: "Multi-region OCR is not running".into(),
+        })
+    }
+}
+
+/// Multi-region OCR loop: captures each defined region, runs OCR, and emits
+/// results only when a region's value changes from the previous scan.
+async fn run_multi_region_loop(app: AppHandle, state: Arc<MultiRegionState>) {
+    let config: AppConfig = match load_config() {
+        Ok(c) => c,
+        Err(e) => {
+            let _ = app.emit("log", LogEvent {
+                level: "error".into(),
+                message: format!("Failed to load config: {e}"),
+            });
+            state.running.store(false, Ordering::SeqCst);
+            let _ = app.emit("multi_region_stopped", ());
+            return;
+        }
+    };
+
+    let regions = config.multi_region.regions.clone();
+    let capture_interval = config.capture.interval_seconds.max(0.1);
+
+    let _ = app.emit("log", LogEvent {
+        level: "info".into(),
+        message: format!("Multi-region OCR started — {} region(s), interval {:.1}s",
+            regions.len(), capture_interval),
+    });
+
+    let mut ticker = interval(Duration::from_secs_f64(capture_interval));
+
+    while state.running.load(Ordering::SeqCst) {
+        ticker.tick().await;
+
+        // Capture the full source image once per tick
+        let full_img = {
+            let src = &config.input_source;
+            if src.source_type == "window" {
+                let hwnd = src.window_hwnd as isize;
+                if hwnd == 0 {
+                    // Full screen capture (no window selected)
+                    capture::capture_screen_region(0, 0, 0, 0)
+                } else {
+                    // Capture the entire window (no sub-region crop)
+                    capture::capture_window_region(hwnd, 0, 0, 0, 0)
+                }
+            } else {
+                capture::capture_camera_frame(src.camera_index)
+            }
+        };
+
+        let full_img = match full_img {
+            Ok(img) => img,
+            Err(e) => {
+                let _ = app.emit("log", LogEvent {
+                    level: "error".into(),
+                    message: format!("Capture failed: {e}"),
+                });
+                continue;
+            }
+        };
+
+        // Encode full image preview
+        let preview_b64 = capture::image_to_base64_jpeg(&full_img).unwrap_or_default();
+
+        // Process each region
+        let mut region_results: Vec<serde_json::Value> = Vec::new();
+        let mut any_changed = false;
+
+        for region in &regions {
+            // Crop the region from the full image
+            let rx = (region.left.max(0) as u32).min(full_img.width().saturating_sub(1));
+            let ry = (region.top.max(0) as u32).min(full_img.height().saturating_sub(1));
+            let rw = (region.width.max(1) as u32).min(full_img.width().saturating_sub(rx)).max(1);
+            let rh = (region.height.max(1) as u32).min(full_img.height().saturating_sub(ry)).max(1);
+            let cropped = full_img.crop_imm(rx, ry, rw, rh);
+
+            let preprocessed = capture::preprocess_for_ocr(&cropped, config.capture.ocr_upscale_factor);
+            let ocr_result = tokio::task::spawn_blocking(move || ocr::run_ocr(&preprocessed)).await;
+
+            let raw_text = match ocr_result {
+                Ok(Ok(results)) => results.iter()
+                    .map(|r| r.text.trim().to_string())
+                    .collect::<Vec<_>>()
+                    .join(" "),
+                _ => String::new(),
+            };
+
+            // Sanitize and apply mismatch threshold
+            let (sanitized, is_valid) = sanitize_value(&raw_text, &region.sanitization_type);
+
+            let final_value = if is_valid {
+                // Valid read — reset mismatch counter
+                if let Ok(mut mc) = state.mismatch_counts.lock() {
+                    mc.insert(region.name.clone(), 0);
+                }
+                sanitized
+            } else {
+                // Invalid read — increment counter
+                let count = {
+                    let mut mc = state.mismatch_counts.lock().unwrap();
+                    let c = mc.entry(region.name.clone()).or_insert(0);
+                    *c += 1;
+                    *c
+                };
+                if count < NO_MATCH_THRESHOLD {
+                    // Hold the last known good value
+                    let last = state.last_values.lock().unwrap();
+                    last.get(&region.name)
+                        .cloned()
+                        .unwrap_or_else(|| default_sanitized_value(&region.sanitization_type))
+                } else {
+                    // Threshold exceeded — fall back to type default
+                    default_sanitized_value(&region.sanitization_type)
+                }
+            };
+
+            // Check if value changed from last scan
+            let changed = {
+                let last = state.last_values.lock().unwrap();
+                last.get(&region.name).map_or(true, |prev| *prev != final_value)
+            };
+
+            if changed {
+                any_changed = true;
+                let _ = app.emit("log", LogEvent {
+                    level: "success".into(),
+                    message: format!("{}: \"{}\"", region.name, final_value),
+                });
+                if let Ok(mut lv) = state.last_values.lock() {
+                    lv.insert(region.name.clone(), final_value.clone());
+                }
+            }
+
+            region_results.push(serde_json::json!({
+                "name": region.name,
+                "value": final_value,
+                "changed": changed,
+                "left": region.left,
+                "top": region.top,
+                "width": region.width,
+                "height": region.height,
+            }));
+        }
+
+        // Always emit preview with current region data (for UI visualization)
+        let preview_payload = serde_json::json!({
+            "image": preview_b64,
+            "regions": region_results,
+        });
+        let _ = app.emit("log", LogEvent {
+            level: "mr_preview".into(),
+            message: preview_payload.to_string(),
+        });
+
+        // vMix Pull: write JSON file whenever any value changed
+        if any_changed && config.vmix_pull.enabled && !config.vmix_pull.output_path.is_empty() {
+            let mut map = serde_json::Map::new();
+            if let Some(arr) = preview_payload["regions"].as_array() {
+                for r in arr {
+                    if let (Some(name), Some(value)) = (r["name"].as_str(), r["value"].as_str()) {
+                        map.insert(name.to_string(), serde_json::Value::String(value.to_string()));
+                    }
+                }
+            }
+            let ts = std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs();
+            map.insert("_updated_at".to_string(), serde_json::Value::Number(ts.into()));
+            if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(map)) {
+                if let Err(e) = fs::write(&config.vmix_pull.output_path, json_str) {
+                    let _ = app.emit("log", LogEvent {
+                        level: "error".into(),
+                        message: format!("vMix Pull write failed: {e}"),
+                    });
+                }
+            }
+        }
+    }
+
+    let _ = app.emit("log", LogEvent {
+        level: "warning".into(),
+        message: "Multi-region OCR stopped".into(),
+    });
+    let _ = app.emit("multi_region_stopped", ());
+}
+
 #[tauri::command]
 fn check_backend(app: AppHandle) -> Result<CommandResult, String> {
     if ocr::is_initialized() {
@@ -1475,6 +1976,22 @@ fn check_backend(app: AppHandle) -> Result<CommandResult, String> {
     }
 }
 
+// ── Folder Picker ────────────────────────────────────────────────────
+
+/// Open a native folder picker dialog and return the selected path.
+/// Used by the vMix Pull settings to let the user choose an output directory.
+#[tauri::command]
+async fn pick_folder() -> Option<String> {
+    tokio::task::spawn_blocking(|| {
+        rfd::FileDialog::new()
+            .pick_folder()
+            .map(|p| p.to_string_lossy().to_string())
+    })
+    .await
+    .ok()
+    .flatten()
+}
+
 // ── Region Selectors ────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1504,6 +2021,7 @@ async fn open_window_region_selector(
     *rs_state.image_b64.lock().unwrap() = Some(b64);
     *rs_state.source_type.lock().unwrap() = "window".into();
     *rs_state.source_hwnd.lock().unwrap() = hwnd;
+    *rs_state.pending_mr_region.lock().unwrap() = None; // normal mode
 
     // Open the region selector window
     open_region_selector_window(&app)?;
@@ -1540,6 +2058,7 @@ async fn open_camera_region_selector(
     *rs_state.image_b64.lock().unwrap() = Some(b64);
     *rs_state.source_type.lock().unwrap() = "camera".into();
     *rs_state.source_camera.lock().unwrap() = _camera_index;
+    *rs_state.pending_mr_region.lock().unwrap() = None; // normal mode
 
     open_region_selector_window(&app)?;
 
@@ -1570,6 +2089,49 @@ fn open_region_selector_window(app: &AppHandle) -> Result<(), String> {
     Ok(())
 }
 
+/// Opens the visual region selector for a multi-region OCR region.
+/// Captures the current input source and stores `region_name` so that
+/// `save_selected_region` writes back into `multi_region.regions`.
+#[tauri::command]
+async fn open_mr_region_selector(
+    app: AppHandle,
+    region_name: String,
+    rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
+) -> Result<CommandResult, String> {
+    let config = load_config()?;
+    let src = &config.input_source;
+
+    let img = if src.source_type == "window" {
+        let hwnd = src.window_hwnd as isize;
+        if hwnd == 0 {
+            capture::capture_screen_region(0, 0, 0, 0)
+        } else {
+            capture::capture_window_region(hwnd, 0, 0, 0, 0)
+        }
+    } else {
+        capture::capture_camera_frame(src.camera_index)
+    }
+    .map_err(|e| format!("Failed to capture: {e}"))?;
+
+    let b64 = capture::image_to_base64_jpeg(&img)
+        .map_err(|e| format!("Failed to encode image: {e}"))?;
+
+    *rs_state.original_width.lock().unwrap() = img.width();
+    *rs_state.original_height.lock().unwrap() = img.height();
+    *rs_state.image_b64.lock().unwrap() = Some(b64);
+    *rs_state.source_type.lock().unwrap() = src.source_type.clone();
+    *rs_state.source_hwnd.lock().unwrap() = src.window_hwnd;
+    *rs_state.source_camera.lock().unwrap() = src.camera_index;
+    *rs_state.pending_mr_region.lock().unwrap() = Some(region_name);
+
+    open_region_selector_window(&app)?;
+
+    Ok(CommandResult {
+        success: true,
+        message: "Region selector opened".into(),
+    })
+}
+
 #[tauri::command]
 fn get_region_selector_image(
     rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
@@ -1595,32 +2157,49 @@ async fn save_selected_region(
     height: i32,
     rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
 ) -> Result<CommandResult, String> {
-    // Load current config
     let mut config = load_config()?;
 
-    let source_type = rs_state.source_type.lock().unwrap().clone();
+    let pending = rs_state.pending_mr_region.lock().unwrap().take();
 
-    // Update the region in config
-    config.input_source.window_region = WindowRegion {
-        left,
-        top,
-        width,
-        height,
-    };
+    if let Some(region_name) = pending {
+        // Multi-region mode: update the named region's coordinates
+        if let Some(r) = config.multi_region.regions.iter_mut().find(|r| r.name == region_name) {
+            r.left = left;
+            r.top = top;
+            r.width = width;
+            r.height = height;
+        }
 
-    // Save config
-    save_config(config)?;
+        save_config(config)?;
 
-    let _ = app.emit(
-        "log",
-        LogEvent {
+        let _ = app.emit("log", LogEvent {
+            level: "success".into(),
+            message: format!(
+                "Region '{}' saved: ({}, {}) {}x{}",
+                region_name, left, top, width, height
+            ),
+        });
+    } else {
+        // Normal mode: update input_source.window_region
+        let source_type = rs_state.source_type.lock().unwrap().clone();
+
+        config.input_source.window_region = WindowRegion {
+            left,
+            top,
+            width,
+            height,
+        };
+
+        save_config(config)?;
+
+        let _ = app.emit("log", LogEvent {
             level: "success".into(),
             message: format!(
                 "Region saved: ({}, {}) {}x{} [{}]",
                 left, top, width, height, source_type
             ),
-        },
-    );
+        });
+    }
 
     // Notify frontend to reload config
     let _ = app.emit("region-saved", ());
@@ -1677,6 +2256,12 @@ pub fn run() {
                 no_match_streak: Mutex::new(0),
             }));
 
+            app.manage(Arc::new(MultiRegionState {
+                running: AtomicBool::new(false),
+                last_values: Mutex::new(std::collections::HashMap::new()),
+                mismatch_counts: Mutex::new(std::collections::HashMap::new()),
+            }));
+
             app.manage(Arc::new(RegionSelectorState {
                 image_b64: Mutex::new(None),
                 original_width: Mutex::new(0),
@@ -1684,6 +2269,7 @@ pub fn run() {
                 source_type: Mutex::new("window".into()),
                 source_hwnd: Mutex::new(0),
                 source_camera: Mutex::new(0),
+                pending_mr_region: Mutex::new(None),
             }));
 
             if models_initialized {
@@ -1709,9 +2295,13 @@ pub fn run() {
             fetch_players_from_server,
             start_ocr,
             stop_ocr,
+            start_multi_region_ocr,
+            stop_multi_region_ocr,
+            open_mr_region_selector,
             check_backend,
             get_region_selector_image,
             save_selected_region,
+            pick_folder,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

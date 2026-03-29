@@ -1,18 +1,24 @@
 import { useState, useEffect } from "react";
 import Dashboard from "./pages/Dashboard";
+import MultiRegionDashboard from "./pages/MultiRegionDashboard";
 import PlayerNames from "./pages/PlayerNames";
 import Settings from "./pages/Settings";
 import { LayoutDashboard, Users, Settings as SettingsIcon } from "lucide-react";
-import { useDispatch } from "react-redux";
+import { useSelector, useDispatch } from "react-redux";
+import { type RootState } from "./store/store";
 import { listen } from "@tauri-apps/api/event";
 import {
   addLog,
+  addMrLog,
   incrementScans,
   incrementDetections,
   incrementMatches,
   setPreviewData,
+  setMrPreviewData,
   setIsRunning,
+  setMrRunning,
   type PreviewData,
+  type MultiRegionPreviewData,
 } from "./store/appSlice";
 
 type Page = "dashboard" | "players" | "settings";
@@ -20,17 +26,22 @@ type Page = "dashboard" | "players" | "settings";
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
   const dispatch = useDispatch();
+  const appMode = useSelector((state: RootState) => state.app.config?.app_mode ?? "player_detection");
+
+  // Players page is not available in multi_region mode — fall back to dashboard
+  const activePage: Page =
+    appMode === "multi_region" && currentPage === "players" ? "dashboard" : currentPage;
 
   useEffect(() => {
     // Global Tauri event listeners mapped to Redux
     const unlistenLog = listen<{ level: string; message: string }>(
       "log",
       (event) => {
+        // Player detection preview
         if (event.payload.level === "preview") {
           try {
             const data: PreviewData = JSON.parse(event.payload.message);
             dispatch(setPreviewData(data));
-            // Update stats from actual detection data
             dispatch(incrementScans());
             if (data.detections && data.detections.length > 0) {
               dispatch(incrementDetections(data.detections.length));
@@ -46,9 +57,27 @@ function App() {
           }
           return;
         }
+        // Multi-region preview
+        if (event.payload.level === "mr_preview") {
+          try {
+            const data: MultiRegionPreviewData = JSON.parse(event.payload.message);
+            dispatch(setMrPreviewData(data));
+          } catch (err) {
+            console.log(err);
+          }
+          return;
+        }
         const time = new Date().toLocaleTimeString("en-US", { hour12: false });
         dispatch(
           addLog({
+            time,
+            level: event.payload.level,
+            message: event.payload.message,
+          }),
+        );
+        // Also route to multi-region logs if MR is running
+        dispatch(
+          addMrLog({
             time,
             level: event.payload.level,
             message: event.payload.message,
@@ -61,9 +90,14 @@ function App() {
       dispatch(setIsRunning(false));
     });
 
+    const unlistenMrStop = listen("multi_region_stopped", () => {
+      dispatch(setMrRunning(false));
+    });
+
     return () => {
       unlistenLog.then((fn) => fn());
       unlistenStop.then((fn) => fn());
+      unlistenMrStop.then((fn) => fn());
     };
   }, [dispatch]);
 
@@ -119,21 +153,23 @@ function App() {
         {/* Navigation Tabs */}
         <div className="tab-bar" style={{ marginLeft: "auto", padding: "4px" }}>
           <button
-            className={`tab-item ${currentPage === "dashboard" ? "active" : ""}`}
+            className={`tab-item ${activePage === "dashboard" ? "active" : ""}`}
             onClick={() => setCurrentPage("dashboard")}
             style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <LayoutDashboard size={16} />
             Dashboard
           </button>
+          {appMode === "player_detection" && (
+            <button
+              className={`tab-item ${activePage === "players" ? "active" : ""}`}
+              onClick={() => setCurrentPage("players")}
+              style={{ display: "flex", alignItems: "center", gap: "8px" }}>
+              <Users size={16} />
+              Players
+            </button>
+          )}
           <button
-            className={`tab-item ${currentPage === "players" ? "active" : ""}`}
-            onClick={() => setCurrentPage("players")}
-            style={{ display: "flex", alignItems: "center", gap: "8px" }}>
-            <Users size={16} />
-            Players
-          </button>
-          <button
-            className={`tab-item ${currentPage === "settings" ? "active" : ""}`}
+            className={`tab-item ${activePage === "settings" ? "active" : ""}`}
             onClick={() => setCurrentPage("settings")}
             style={{ display: "flex", alignItems: "center", gap: "8px" }}>
             <SettingsIcon size={16} />
@@ -144,9 +180,11 @@ function App() {
 
       {/* ── Page Content ────────────────────────── */}
       <main style={{ flex: 1, overflow: "hidden", position: "relative" }}>
-        {currentPage === "dashboard" && <Dashboard />}
-        {currentPage === "players" && <PlayerNames />}
-        {currentPage === "settings" && <Settings />}
+        {activePage === "dashboard" && (
+          appMode === "multi_region" ? <MultiRegionDashboard /> : <Dashboard />
+        )}
+        {activePage === "players" && appMode === "player_detection" && <PlayerNames />}
+        {activePage === "settings" && <Settings />}
       </main>
 
       {/* ── Footer ──────────────────────────────── */}

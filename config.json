@@ -1,8 +1,9 @@
 {
+  "app_mode": "multi_region",
   "input_source": {
     "type": "window",
-    "window_hwnd": 2099496,
-    "window_title": "(327) FFBPL S1 গ্র্যান্ড ফাইনাল | Garena Free Fire - YouTube - Google Chrome",
+    "window_hwnd": 67874,
+    "window_title": "Media Player",
     "window_region": {
       "left": 338,
       "top": 610,
@@ -26,22 +27,103 @@
     "use_gpu": false
   },
   "capture": {
-    "interval_seconds": 0.1,
+    "interval_seconds": 0.5,
     "save_debug_screenshots": false,
-    "debug_screenshot_dir": "debug_captures"
+    "debug_screenshot_dir": "debug_captures",
+    "ocr_upscale_factor": 3
   },
   "saved_regions": {
-    "@JARV!S - Discord": {
-      "left": 59,
-      "top": 325,
-      "width": 222,
-      "height": 37
-    },
     "*I want to make a Stand-alone FaceCa - Notepad": {
       "left": 9,
       "top": 249,
       "width": 235,
       "height": 43
+    },
+    "@JARV!S - Discord": {
+      "left": 59,
+      "top": 325,
+      "width": 222,
+      "height": 37
     }
+  },
+  "multi_region": {
+    "regions": [
+      {
+        "name": "time",
+        "left": 458,
+        "top": 251,
+        "width": 43,
+        "height": 18,
+        "sanitization_type": "mmss"
+      },
+      {
+        "name": "l_gold",
+        "left": 370,
+        "top": 253,
+        "width": 43,
+        "height": 17,
+        "sanitization_type": "num4k"
+      },
+      {
+        "name": "l_turret",
+        "left": 332,
+        "top": 254,
+        "width": 24,
+        "height": 15,
+        "sanitization_type": "num2"
+      },
+      {
+        "name": "l_lord",
+        "left": 289,
+        "top": 254,
+        "width": 28,
+        "height": 15,
+        "sanitization_type": "num2"
+      },
+      {
+        "name": "r_gold",
+        "left": 568,
+        "top": 254,
+        "width": 36,
+        "height": 15,
+        "sanitization_type": "num4k"
+      },
+      {
+        "name": "r_turret",
+        "left": 624,
+        "top": 253,
+        "width": 30,
+        "height": 18,
+        "sanitization_type": "num2"
+      },
+      {
+        "name": "r_lord",
+        "left": 663,
+        "top": 252,
+        "width": 21,
+        "height": 20,
+        "sanitization_type": "num2"
+      },
+      {
+        "name": "l_score",
+        "left": 425,
+        "top": 248,
+        "width": 33,
+        "height": 26,
+        "sanitization_type": "num2"
+      },
+      {
+        "name": "r_score",
+        "left": 507,
+        "top": 248,
+        "width": 38,
+        "height": 26,
+        "sanitization_type": "num2"
+      }
+    ]
+  },
+  "vmix_pull": {
+    "enabled": true,
+    "output_path": "D:\\json for vmix\\vmix_data.json"
   }
 }

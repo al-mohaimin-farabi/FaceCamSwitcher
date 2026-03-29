@@ -17,8 +17,35 @@ export interface CameraInfo {
 }
 
 
+export interface OcrRegion {
+  name: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+  /** Sanitization applied to raw OCR output. "none"|"num2"|"num4k"|"mmss"|"text" */
+  sanitization_type: string;
+}
+
+export interface MultiRegionPreviewData {
+  image: string;
+  regions: {
+    name: string;
+    value: string;
+    changed: boolean;
+    left: number;
+    top: number;
+    width: number;
+    height: number;
+  }[];
+}
+
 export interface AppConfig {
+  app_mode: "player_detection" | "multi_region";
   saved_regions: Record<string, { left: number; top: number; width: number; height: number }>;
+  multi_region: {
+    regions: OcrRegion[];
+  };
   input_source: {
     type: "window" | "camera";
     window_hwnd: number;
@@ -49,6 +76,11 @@ export interface AppConfig {
     interval_seconds: number;
     save_debug_screenshots: boolean;
     debug_screenshot_dir: string;
+    ocr_upscale_factor: number;
+  };
+  vmix_pull: {
+    enabled: boolean;
+    output_path: string;
   };
 }
 
@@ -78,6 +110,10 @@ interface AppState {
   backendStatus: string;
   fetchedPlayerCount: number;
   wsConnected: boolean;
+  // Multi-region mode
+  mrRunning: boolean;
+  mrLogs: LogEntry[];
+  mrPreviewData: MultiRegionPreviewData | null;
 }
 
 const initialState: AppState = {
@@ -92,6 +128,9 @@ const initialState: AppState = {
   backendStatus: "Checking...",
   fetchedPlayerCount: 0,
   wsConnected: false,
+  mrRunning: false,
+  mrLogs: [],
+  mrPreviewData: null,
 };
 
 export const appSlice = createSlice({
@@ -155,6 +194,26 @@ export const appSlice = createSlice({
     setWsConnected: (state, action: PayloadAction<boolean>) => {
       state.wsConnected = action.payload;
     },
+    // Multi-region reducers
+    setMrRunning: (state, action: PayloadAction<boolean>) => {
+      state.mrRunning = action.payload;
+      if (action.payload) {
+        state.mrLogs = [];
+        state.mrPreviewData = null;
+      }
+    },
+    addMrLog: (state, action: PayloadAction<LogEntry>) => {
+      state.mrLogs.push(action.payload);
+      if (state.mrLogs.length > 50) {
+        state.mrLogs.shift();
+      }
+    },
+    clearMrLogs: (state) => {
+      state.mrLogs = [];
+    },
+    setMrPreviewData: (state, action: PayloadAction<MultiRegionPreviewData | null>) => {
+      state.mrPreviewData = action.payload;
+    },
   },
 });
 
@@ -173,6 +232,10 @@ export const {
   setBackendStatus,
   setFetchedPlayerCount,
   setWsConnected,
+  setMrRunning,
+  addMrLog,
+  clearMrLogs,
+  setMrPreviewData,
 } = appSlice.actions;
 
 export default appSlice.reducer;

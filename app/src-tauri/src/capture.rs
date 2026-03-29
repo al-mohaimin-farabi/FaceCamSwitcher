@@ -765,8 +765,26 @@ fn capture_camera_frame_mf(camera_index: u32) -> Result<DynamicImage, String> {
     }
 }
 
-/// Preprocess for OCR: PaddleOCR models are trained on raw RGB images.
-/// Grayscale + aggressive contrast stretching actually destroys subpixel font rendering and hurts accuracy.
-pub fn preprocess_for_ocr(img: &DynamicImage) -> RgbImage {
-    img.to_rgb8()
+/// Preprocess for OCR.
+/// - N× upscale (configurable): PaddleOCR is trained on print-resolution images;
+///   game UI text is often small/thin and benefits significantly from upscaling.
+/// - White padding: prevents the detector from clipping characters at region edges.
+/// No colour/contrast manipulation — PaddleOCR handles raw RGB well and any
+/// binarization or contrast stretch destroys thin details like decimal points.
+pub fn preprocess_for_ocr(img: &DynamicImage, scale: u32) -> RgbImage {
+    let scale = scale.max(1); // never go below 1×
+    let upscaled = img.resize_exact(
+        img.width() * scale,
+        img.height() * scale,
+        image::imageops::FilterType::Triangle,
+    );
+    let upscaled_rgb = upscaled.to_rgb8();
+
+    // 12-px white border
+    let pad: u32 = 12;
+    let pw = upscaled_rgb.width() + pad * 2;
+    let ph = upscaled_rgb.height() + pad * 2;
+    let mut canvas = RgbImage::from_pixel(pw, ph, image::Rgb([255u8, 255, 255]));
+    image::imageops::replace(&mut canvas, &upscaled_rgb, pad as i64, pad as i64);
+    canvas
 }
