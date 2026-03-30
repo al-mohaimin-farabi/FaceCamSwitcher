@@ -53,6 +53,7 @@ export default function MultiRegionDashboard() {
     config,
     mrRunning,
     mrLogs,
+    mrChangeCount,
     mrPreviewData,
     windowList,
     cameraList,
@@ -419,7 +420,7 @@ export default function MultiRegionDashboard() {
             {[
               { label: "Regions", value: regions.length, color: "var(--accent)" },
               { label: "Configured", value: regions.filter((r) => r.width > 0).length, color: "var(--cyan)" },
-              { label: "Changes", value: mrLogs.filter((l) => l.level === "success").length, color: "var(--green)" },
+              { label: "Changes", value: mrChangeCount, color: "var(--green)" },
             ].map(({ label, value, color }) => (
               <div key={label} className="stat-card" style={{ padding: 10 }}>
                 <div className="value" style={{ fontSize: 18, color }}>{value}</div>

@@ -113,6 +113,7 @@ interface AppState {
   // Multi-region mode
   mrRunning: boolean;
   mrLogs: LogEntry[];
+  mrChangeCount: number;
   mrPreviewData: MultiRegionPreviewData | null;
 }
 
@@ -130,6 +131,7 @@ const initialState: AppState = {
   wsConnected: false,
   mrRunning: false,
   mrLogs: [],
+  mrChangeCount: 0,
   mrPreviewData: null,
 };
 
@@ -199,6 +201,7 @@ export const appSlice = createSlice({
       state.mrRunning = action.payload;
       if (action.payload) {
         state.mrLogs = [];
+        state.mrChangeCount = 0;
         state.mrPreviewData = null;
       }
     },
@@ -206,6 +209,9 @@ export const appSlice = createSlice({
       state.mrLogs.push(action.payload);
       if (state.mrLogs.length > 50) {
         state.mrLogs.shift();
+      }
+      if (action.payload.level === "success") {
+        state.mrChangeCount += 1;
       }
     },
     clearMrLogs: (state) => {

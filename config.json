@@ -2,7 +2,7 @@
   "app_mode": "multi_region",
   "input_source": {
     "type": "window",
-    "window_hwnd": 67874,
+    "window_hwnd": 394688,
     "window_title": "Media Player",
     "window_region": {
       "left": 338,
