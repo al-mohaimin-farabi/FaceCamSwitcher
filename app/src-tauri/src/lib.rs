@@ -1921,7 +1921,7 @@ async fn run_multi_region_loop(app: AppHandle, state: Arc<MultiRegionState>) {
                 .unwrap_or_default()
                 .as_secs();
             map.insert("_updated_at".to_string(), serde_json::Value::Number(ts.into()));
-            if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(map)) {
+            if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Array(vec![serde_json::Value::Object(map)])) {
                 if let Err(e) = fs::write(&config.vmix_pull.output_path, json_str) {
                     let _ = app.emit("log", LogEvent {
                         level: "error".into(),
