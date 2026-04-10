@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "FaceCam",
+  "productName": "Efinity FaceCam",
   "version": "0.1.0",
   "identifier": "com.themis.facecam",
   "build": {
@@ -42,11 +42,17 @@
     ],
     "windows": {
       "nsis": {
-        "installMode": "perMachine"
+        "installMode": "perMachine",
+        "installerIcon": "icons/icon.ico"
       },
       "webviewInstallMode": {
         "type": "downloadBootstrapper"
       }
-    }
+    },
+    "shortDescription": "Free Fire esports stats and match data tool",
+    "longDescription": "Efinity FireStats is a desktop application for fetching and analyzing Free Fire esports match data, weapon progression, and player statistics.",
+    "publisher": "THEMIS",
+    "category": "Utility",
+    "copyright": "Copyright © 2026 THEMIS"
   }
 }

@@ -63,7 +63,8 @@ export default function Settings() {
     };
   }, [dispatch]);
 
-  // Ping server health endpoint when API URL changes or sync is toggled
+  // Ping server health endpoint when API URL changes or sync is toggled.
+  // Uses invoke() (Rust reqwest) instead of fetch() to avoid CORS issues.
   useEffect(() => {
     if (!config?.server.enabled || !config.server.api_url) {
       setServerOnline(null);
@@ -72,11 +73,10 @@ export default function Settings() {
     let cancelled = false;
     const checkHealth = async () => {
       try {
-        const resp = await fetch(
-          `${config.server.api_url.replace(/\/+$/, "")}/api/health`,
-          { signal: AbortSignal.timeout(5000) },
+        const result = await invoke<{ success: boolean; message: string }>(
+          "check_server_health",
         );
-        if (!cancelled) setServerOnline(resp.ok);
+        if (!cancelled) setServerOnline(result.success);
       } catch {
         if (!cancelled) setServerOnline(false);
       }

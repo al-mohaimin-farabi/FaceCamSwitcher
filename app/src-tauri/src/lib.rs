@@ -1475,6 +1475,41 @@ fn check_backend(app: AppHandle) -> Result<CommandResult, String> {
     }
 }
 
+/// Ping /api/health on the configured API server via Rust reqwest (no CORS).
+/// Returns { success: true } if the server responds with HTTP 200, false otherwise.
+#[tauri::command]
+async fn check_server_health() -> Result<CommandResult, String> {
+    let config = match load_config() {
+        Ok(c) => c,
+        Err(_) => return Ok(CommandResult { success: false, message: "Config not loaded".into() }),
+    };
+
+    if !config.server.enabled || config.server.api_url.is_empty() {
+        return Ok(CommandResult { success: false, message: "Server sync disabled".into() });
+    }
+
+    let url = format!("{}/api/health", config.server.api_url.trim_end_matches('/'));
+    let client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(CommandResult {
+            success: true,
+            message: "Server online".into(),
+        }),
+        Ok(resp) => Ok(CommandResult {
+            success: false,
+            message: format!("Server returned {}", resp.status()),
+        }),
+        Err(e) => Ok(CommandResult {
+            success: false,
+            message: format!("Unreachable: {e}"),
+        }),
+    }
+}
+
 // ── Region Selectors ────────────────────────────────────────────────
 
 #[tauri::command]
@@ -1710,6 +1745,7 @@ pub fn run() {
             start_ocr,
             stop_ocr,
             check_backend,
+            check_server_health,
             get_region_selector_image,
             save_selected_region,
         ])
