@@ -1368,8 +1368,17 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                     },
                 );
 
-                // Send to server
-                let client_opt = state.sio_client.lock().ok().and_then(|g| g.clone());
+                // Send to server — only after ocrAuth is confirmed (sio_connected = true).
+                // Gating on sio_connected rather than just sio_client prevents a race
+                // where the socket is connected but auth hasn't completed: the server
+                // would drop the event (role != "OCR"), but last_sent_player would still
+                // be updated, causing the next scan of the same player to be silently
+                // skipped by Rust-side dedup even after auth succeeds.
+                let client_opt = if state.sio_connected.load(Ordering::SeqCst) {
+                    state.sio_client.lock().ok().and_then(|g| g.clone())
+                } else {
+                    None
+                };
                 if let Some(client) = client_opt {
                     match &effective_player_id {
                         Some(pid) => {
@@ -1389,11 +1398,12 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                             let _ = client.emit("noMatch", serde_json::json!({})).await;
                         }
                     }
-                }
-
-                // Update last sent
-                if let Ok(mut last) = state.last_sent_player.lock() {
-                    *last = Some(effective_player_id);
+                    // Update dedup state ONLY when we actually sent to the server.
+                    // Updating unconditionally (even when client was None or not yet authed)
+                    // caused the next identical scan to be silently skipped.
+                    if let Ok(mut last) = state.last_sent_player.lock() {
+                        *last = Some(effective_player_id);
+                    }
                 }
             }
         }
