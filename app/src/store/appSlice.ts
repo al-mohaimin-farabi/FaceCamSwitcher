@@ -38,6 +38,8 @@ export interface AppConfig {
     ws_url: string;     // WebSocket URL for OCR bridge
     tournament_id: string;
     secret_key: string;
+    source_mode: boolean;  // if true, routes events to a source slot channel
+    source_id: string;     // e.g. "01", "02", "03"
   };
   ocr: {
     language: string;

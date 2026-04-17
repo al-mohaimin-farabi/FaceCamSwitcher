@@ -591,6 +591,93 @@ export default function Settings() {
                 />
               </div>
 
+              {/* Source Mode toggle */}
+              <div
+                style={{
+                  padding: "12px 14px",
+                  borderRadius: 12,
+                  background: config.server.source_mode
+                    ? "rgba(168,85,247,0.06)"
+                    : "rgba(255,255,255,0.03)",
+                  border: `1px solid ${config.server.source_mode ? "rgba(168,85,247,0.3)" : "var(--border)"}`,
+                  display: "flex",
+                  alignItems: "center",
+                  justifyContent: "space-between",
+                }}>
+                <div>
+                  <span
+                    style={{
+                      fontSize: 13,
+                      fontWeight: 600,
+                      color: config.server.source_mode
+                        ? "#c084fc"
+                        : "var(--text-secondary)",
+                    }}>
+                    Source Mode
+                  </span>
+                  <p
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-muted)",
+                      marginTop: 2,
+                    }}>
+                    {config.server.source_mode
+                      ? "Routes OCR to an isolated source slot channel"
+                      : "Global mode — routes OCR to the tournament room"}
+                  </p>
+                </div>
+                <div
+                  onClick={() =>
+                    updateConfig("server.source_mode", !config.server.source_mode)
+                  }
+                  style={{
+                    width: 36,
+                    height: 20,
+                    borderRadius: 10,
+                    flexShrink: 0,
+                    background: config.server.source_mode
+                      ? "#a855f7"
+                      : "rgba(255,255,255,0.1)",
+                    position: "relative",
+                    cursor: "pointer",
+                  }}>
+                  <div
+                    style={{
+                      width: 14,
+                      height: 14,
+                      borderRadius: "50%",
+                      background: "white",
+                      position: "absolute",
+                      top: 3,
+                      left: config.server.source_mode ? 19 : 3,
+                    }}
+                  />
+                </div>
+              </div>
+
+              {/* Source ID selector — visible only in source mode */}
+              {config.server.source_mode && (
+                <div className="input-group">
+                  <label
+                    style={{ display: "flex", alignItems: "center", gap: 6 }}>
+                    <Hash size={12} style={{ color: "#c084fc" }} />
+                    Source Slot
+                  </label>
+                  <select
+                    className="input"
+                    value={config.server.source_id}
+                    onChange={(e) =>
+                      updateConfig("server.source_id", e.target.value)
+                    }>
+                    {["01", "02", "03"].map((id) => (
+                      <option key={id} value={id}>
+                        Source {id}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+              )}
+
               {/* Server status badge */}
               {serverOnline !== null && (
                 <div

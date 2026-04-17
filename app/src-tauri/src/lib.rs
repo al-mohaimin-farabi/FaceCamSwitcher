@@ -129,6 +129,14 @@ struct ServerConfig {
     /// OCR_SECRET_KEY from the server .env — used for API auth and WS auth.
     #[serde(default)]
     secret_key: String,
+    /// If true, routes OCR events to an isolated source slot channel instead
+    /// of the global tournament room. Requires source_id to be set.
+    #[serde(default)]
+    source_mode: bool,
+    /// Zero-padded source slot ID, e.g. "01", "02", "03".
+    /// Only used when source_mode is true.
+    #[serde(default)]
+    source_id: String,
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -187,7 +195,9 @@ fn ensure_default_config(dir: &PathBuf) {
     "api_url": "https://facecamapi.ecube.gg",
     "ws_url": "wss://facecamapi.ecube.gg",
     "tournament_id": "",
-    "secret_key": ""
+    "secret_key": "",
+    "source_mode": false,
+    "source_id": "01"
   },
   "ocr": {
     "language": "en",
@@ -895,8 +905,16 @@ async fn start_ocr(
         let app_ws = app.clone();
         let tournament_id = config.server.tournament_id.clone();
         let secret_key = config.server.secret_key.clone();
+        // Pass source_id only when source_mode is active and a valid ID is set
+        let source_id: Option<String> = if config.server.source_mode
+            && !config.server.source_id.is_empty()
+        {
+            Some(config.server.source_id.clone())
+        } else {
+            None
+        };
         tokio::spawn(async move {
-            run_socketio_loop(app_ws, state_ws, server_url, tournament_id, secret_key).await;
+            run_socketio_loop(app_ws, state_ws, server_url, tournament_id, secret_key, source_id).await;
         });
     }
 
@@ -921,6 +939,7 @@ async fn run_socketio_loop(
     server_url: String,
     tournament_id: String,
     secret_key: String,
+    source_id: Option<String>,
 ) {
     let reconnect_delay = Duration::from_secs(5);
 
@@ -982,11 +1001,16 @@ async fn run_socketio_loop(
                     *guard = Some(client.clone());
                 }
 
-                // Authenticate with server via ocrAuth event + ack callback
-                let auth_payload = serde_json::json!({
+                // Authenticate with server via ocrAuth event + ack callback.
+                // Include sourceId when source_mode is active so the server
+                // routes OCR events to the isolated source channel.
+                let mut auth_payload = serde_json::json!({
                     "secretKey": secret_key,
                     "tournamentId": tournament_id,
                 });
+                if let Some(ref sid) = source_id {
+                    auth_payload["sourceId"] = serde_json::Value::String(sid.clone());
+                }
 
                 let app_ack = app.clone();
                 let state_ack = state.clone();
