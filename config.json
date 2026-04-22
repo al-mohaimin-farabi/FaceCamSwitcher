@@ -1,13 +1,13 @@
 {
   "input_source": {
     "type": "window",
-    "window_hwnd": 1903116,
-    "window_title": "*RHK.BLADE - Notepad",
+    "window_hwnd": 1443930,
+    "window_title": "Untitled - Notepad",
     "window_region": {
-      "left": 8,
-      "top": 87,
-      "width": 110,
-      "height": 26
+      "left": 2,
+      "top": 78,
+      "width": 109,
+      "height": 40
     },
     "camera_index": 2
   },
@@ -17,7 +17,9 @@
     "api_url": "http://192.168.68.100:5000",
     "ws_url": "http://192.168.68.100:5000",
     "tournament_id": "cmnrkp9xy001iwgtzgu0y62wy",
-    "secret_key": "41de4a14327bdb6e84bc0667575d52048a164e01ffc0b39520a27223937ff8b3"
+    "secret_key": "41de4a14327bdb6e84bc0667575d52048a164e01ffc0b39520a27223937ff8b3",
+    "source_mode": true,
+    "source_id": ""
   },
   "ocr": {
     "language": "en",
@@ -31,17 +33,17 @@
     "debug_screenshot_dir": "debug_captures"
   },
   "saved_regions": {
-    "*I want to make a Stand-alone FaceCa - Notepad": {
-      "left": 9,
-      "top": 249,
-      "width": 235,
-      "height": 43
-    },
     "@JARV!S - Discord": {
       "left": 59,
       "top": 325,
       "width": 222,
       "height": 37
+    },
+    "*I want to make a Stand-alone FaceCa - Notepad": {
+      "left": 9,
+      "top": 249,
+      "width": 235,
+      "height": 43
     }
   }
 }
