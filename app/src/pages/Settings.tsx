@@ -123,6 +123,26 @@ export default function Settings() {
     dispatch(updateConfigField({ path, value }));
   };
 
+  // Auto-save helper — accepts multiple field updates and writes them all
+  // in a single disk write. source_mode and source_id are read from disk at
+  // start_ocr time so they must be persisted immediately, not just in Redux.
+  const saveConfigFields = async (fields: Record<string, any>) => {
+    if (!config) return;
+    const newConfig = JSON.parse(JSON.stringify(config));
+    for (const [path, value] of Object.entries(fields)) {
+      dispatch(updateConfigField({ path, value }));
+      const keys = path.split(".");
+      let obj: any = newConfig;
+      for (let i = 0; i < keys.length - 1; i++) obj = obj[keys[i]];
+      obj[keys[keys.length - 1]] = value;
+    }
+    try {
+      await invoke("save_config", { config: newConfig });
+    } catch (e) {
+      showMessage(`Auto-save failed: ${e}`, "error");
+    }
+  };
+
   const handleFetchPlayers = async () => {
     setIsFetchingPlayers(true);
     setFetchError(null);
@@ -627,9 +647,15 @@ export default function Settings() {
                   </p>
                 </div>
                 <div
-                  onClick={() =>
-                    updateConfig("server.source_mode", !config.server.source_mode)
-                  }
+                  onClick={() => {
+                    const newMode = !config.server.source_mode;
+                    // When enabling source mode with an empty source_id, default to
+                    // "01" in the same write — prevents the silent global-mode fallback
+                    // in Rust where source_mode=true + source_id="" → global mode.
+                    const fields: Record<string, any> = { "server.source_mode": newMode };
+                    if (newMode && !config.server.source_id) fields["server.source_id"] = "01";
+                    saveConfigFields(fields);
+                  }}
                   style={{
                     width: 36,
                     height: 20,
@@ -665,9 +691,9 @@ export default function Settings() {
                   </label>
                   <select
                     className="input"
-                    value={config.server.source_id}
+                    value={config.server.source_id || "01"}
                     onChange={(e) =>
-                      updateConfig("server.source_id", e.target.value)
+                      saveConfigFields({ "server.source_id": e.target.value })
                     }>
                     {["01", "02", "03"].map((id) => (
                       <option key={id} value={id}>

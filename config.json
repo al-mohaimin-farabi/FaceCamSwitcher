@@ -1,13 +1,13 @@
 {
   "input_source": {
     "type": "window",
-    "window_hwnd": 1443930,
-    "window_title": "Untitled - Notepad",
+    "window_hwnd": 330414,
+    "window_title": "*X2.NRXJOD - Notepad",
     "window_region": {
-      "left": 2,
-      "top": 78,
-      "width": 109,
-      "height": 40
+      "left": 4,
+      "top": 83,
+      "width": 125,
+      "height": 36
     },
     "camera_index": 2
   },
@@ -19,13 +19,13 @@
     "tournament_id": "cmnrkp9xy001iwgtzgu0y62wy",
     "secret_key": "41de4a14327bdb6e84bc0667575d52048a164e01ffc0b39520a27223937ff8b3",
     "source_mode": true,
-    "source_id": ""
+    "source_id": "01"
   },
   "ocr": {
     "language": "en",
     "confidence_threshold": 0.6,
     "fuzzy_match_threshold": 70,
-    "use_gpu": false
+    "use_gpu": true
   },
   "capture": {
     "interval_seconds": 0.1,
@@ -33,17 +33,17 @@
     "debug_screenshot_dir": "debug_captures"
   },
   "saved_regions": {
-    "@JARV!S - Discord": {
-      "left": 59,
-      "top": 325,
-      "width": 222,
-      "height": 37
-    },
     "*I want to make a Stand-alone FaceCa - Notepad": {
       "left": 9,
       "top": 249,
       "width": 235,
       "height": 43
+    },
+    "@JARV!S - Discord": {
+      "left": 59,
+      "top": 325,
+      "width": 222,
+      "height": 37
     }
   }
 }

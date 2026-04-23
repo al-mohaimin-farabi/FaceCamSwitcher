@@ -905,11 +905,19 @@ async fn start_ocr(
         let app_ws = app.clone();
         let tournament_id = config.server.tournament_id.clone();
         let secret_key = config.server.secret_key.clone();
-        // Pass source_id only when source_mode is active and a valid ID is set
-        let source_id: Option<String> = if config.server.source_mode
-            && !config.server.source_id.is_empty()
-        {
-            Some(config.server.source_id.clone())
+        // Pass source_id only when source_mode is active.
+        // If source_id is empty (e.g. config predates this field), fall back to
+        // "01" and warn — prevents silent global-mode connection.
+        let source_id: Option<String> = if config.server.source_mode {
+            if config.server.source_id.is_empty() {
+                let _ = app.emit("log", LogEvent {
+                    level: "warning".into(),
+                    message: "source_mode is ON but source_id is empty — defaulting to Source 01. Set a source slot in Settings.".into(),
+                });
+                Some("01".to_string())
+            } else {
+                Some(config.server.source_id.clone())
+            }
         } else {
             None
         };
@@ -944,11 +952,15 @@ async fn run_socketio_loop(
     let reconnect_delay = Duration::from_secs(5);
 
     while state.running.load(Ordering::SeqCst) {
+        let mode_label = match &source_id {
+            Some(sid) => format!("source mode (Source {})", sid),
+            None => "global mode".to_string(),
+        };
         let _ = app.emit(
             "log",
             LogEvent {
                 level: "info".into(),
-                message: format!("Connecting to server: {server_url}"),
+                message: format!("Connecting to {} — {}", server_url, mode_label),
             },
         );
 
@@ -1014,6 +1026,7 @@ async fn run_socketio_loop(
 
                 let app_ack = app.clone();
                 let state_ack = state.clone();
+                let source_id_log = source_id.clone();
 
                 let auth_result = Arc::new(tokio::sync::Notify::new());
                 let auth_success = Arc::new(AtomicBool::new(false));
@@ -1030,6 +1043,7 @@ async fn run_socketio_loop(
                             let s = state_ack.clone();
                             let n = notify_clone.clone();
                             let sc = success_clone.clone();
+                            let sid_log = source_id_log.clone();
                             async move {
                                 // Parse ack response — the server callback({ success, message })
                                 // arrives as Payload::Text([Array([Object])]) due to Socket.io
@@ -1057,11 +1071,15 @@ async fn run_socketio_loop(
                                 if ok {
                                     s.sio_connected.store(true, Ordering::SeqCst);
                                     sc.store(true, Ordering::SeqCst);
+                                    let mode_label = match &sid_log {
+                                        Some(sid) => format!("source mode (Source {})", sid),
+                                        None => "global mode".to_string(),
+                                    };
                                     let _ = a.emit(
                                         "log",
                                         LogEvent {
                                             level: "success".into(),
-                                            message: "OCR authenticated with server".into(),
+                                            message: format!("OCR authenticated — {}", mode_label),
                                         },
                                     );
                                 } else {
