@@ -1,22 +1,22 @@
 {
   "input_source": {
     "type": "window",
-    "window_hwnd": 330414,
+    "window_hwnd": 2886050,
     "window_title": "*X2.NRXJOD - Notepad",
     "window_region": {
-      "left": 4,
-      "top": 83,
-      "width": 125,
-      "height": 36
+      "left": 5,
+      "top": 82,
+      "width": 123,
+      "height": 37
     },
     "camera_index": 2
   },
   "server": {
     "enabled": true,
     "url": "http://localhost:3000/api/facecam",
-    "api_url": "http://192.168.68.100:5000",
-    "ws_url": "http://192.168.68.100:5000",
-    "tournament_id": "cmnrkp9xy001iwgtzgu0y62wy",
+    "api_url": "https://facecamapi.ecube.gg",
+    "ws_url": "https://facecamapi.ecube.gg",
+    "tournament_id": "cmoeu4xwt00012tqvtlfa9jz6",
     "secret_key": "41de4a14327bdb6e84bc0667575d52048a164e01ffc0b39520a27223937ff8b3",
     "source_mode": true,
     "source_id": "01"
