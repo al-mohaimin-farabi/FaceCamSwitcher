@@ -1056,8 +1056,6 @@ async fn run_socketio_loop(
                     sc.store(true, Ordering::SeqCst);
                     if s.loop_generation.load(Ordering::SeqCst) == cb_gen {
                         s.sio_connected.store(true, Ordering::SeqCst);
-                        // Reset dedup so the first detection after auth always sends,
-                        // even if the same player was detected (and logged) before auth.
                         if let Ok(mut last) = s.last_sent_player.lock() {
                             *last = None;
                         }
@@ -1065,6 +1063,10 @@ async fn run_socketio_loop(
                             Some(sid) => format!("source mode (Source {})", sid),
                             None => "global mode".to_string(),
                         };
+                        // Emit ws_status first so the UI shows "Connected" before "Authenticated".
+                        // The on("connect") callback in rust_socketio is unreliable — this
+                        // guarantees ws_status is always set when auth succeeds.
+                        let _ = a.emit("ws_status", serde_json::json!({ "connected": true }));
                         let _ = a.emit("log", LogEvent {
                             level: "success".into(),
                             message: format!("OCR authenticated — {}", mode_label),
