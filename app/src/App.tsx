@@ -5,6 +5,7 @@ import Settings from "./pages/Settings";
 import { LayoutDashboard, Users, Settings as SettingsIcon } from "lucide-react";
 import { useDispatch } from "react-redux";
 import { listen } from "@tauri-apps/api/event";
+import { invoke } from "@tauri-apps/api/core";
 import {
   addLog,
   incrementScans,
@@ -12,6 +13,8 @@ import {
   incrementMatches,
   setPreviewData,
   setIsRunning,
+  setWsConnected,
+  setOcrAuthenticated,
   type PreviewData,
 } from "./store/appSlice";
 
@@ -59,11 +62,49 @@ function App() {
 
     const unlistenStop = listen("ocr_stopped", () => {
       dispatch(setIsRunning(false));
+      dispatch(setWsConnected(false));
+      dispatch(setOcrAuthenticated(false));
     });
+
+    const unlistenWs = listen<{ connected: boolean }>("ws_status", (e) => {
+      dispatch(setWsConnected(e.payload.connected));
+      if (!e.payload.connected) dispatch(setOcrAuthenticated(false));
+    });
+
+    const unlistenAuth = listen("ocr_authenticated", () => {
+      dispatch(setOcrAuthenticated(true));
+    });
+
+    // Sync Redux UI state with the actual Rust state on mount.
+    // Critical for: webview reloads (Ctrl+R), Vite HMR, app restarts —
+    // anything that re-mounts React while the Rust process keeps running.
+    invoke<boolean>("is_ocr_running")
+      .then((running) => dispatch(setIsRunning(running)))
+      .catch(() => {
+        /* command not available — first install or older binary; ignore */
+      });
+
+    // Block reload shortcuts in production. Accidental Ctrl+R / F5 / Ctrl+Shift+R
+    // would re-mount React while Rust state continues running, producing a
+    // confusing UI desync. The state-sync above is the safety net; this is the
+    // primary guard.
+    const blockReload = (e: KeyboardEvent) => {
+      const isReload =
+        e.key === "F5" ||
+        ((e.ctrlKey || e.metaKey) && (e.key === "r" || e.key === "R"));
+      if (isReload) {
+        e.preventDefault();
+        e.stopPropagation();
+      }
+    };
+    window.addEventListener("keydown", blockReload, { capture: true });
 
     return () => {
       unlistenLog.then((fn) => fn());
       unlistenStop.then((fn) => fn());
+      unlistenWs.then((fn) => fn());
+      unlistenAuth.then((fn) => fn());
+      window.removeEventListener("keydown", blockReload, { capture: true });
     };
   }, [dispatch]);
 

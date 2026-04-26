@@ -1,6 +1,6 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Users, Search, RefreshCw, X, Filter, Pencil, Check } from "lucide-react";
+import { Users, Search, RefreshCw, X, Filter, Pencil, Check, Trash2 } from "lucide-react";
 
 interface Message {
   text: string;
@@ -56,6 +56,28 @@ export default function PlayerNames() {
       showMessage(`Error: ${e}`, "error");
     }
     setEditingPlayer(null);
+  };
+
+  const handleClearAll = async () => {
+    if (players.length === 0) return;
+    const confirmed = window.confirm(
+      `Remove all ${players.length} players from the database?\n\nThis cannot be undone.`,
+    );
+    if (!confirmed) return;
+    try {
+      const result = await invoke<{ success: boolean; message: string }>(
+        "save_players",
+        { players: [] },
+      );
+      if (result.success) {
+        showMessage("All players cleared", "success");
+        loadPlayers();
+      } else {
+        showMessage(result.message, "error");
+      }
+    } catch (e) {
+      showMessage(`Error: ${e}`, "error");
+    }
   };
 
   const handleRemovePlayer = async (name: string) => {
@@ -156,6 +178,23 @@ export default function PlayerNames() {
             title="Reload from local file">
             <RefreshCw size={14} className={isLoading ? "animate-spin" : ""} />
             <span style={{ fontSize: 11, fontWeight: 600 }}>Reload</span>
+          </button>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={handleClearAll}
+            disabled={players.length === 0}
+            style={{
+              borderRadius: "10px",
+              display: "flex",
+              alignItems: "center",
+              gap: 8,
+              padding: "0 12px",
+              color: players.length === 0 ? undefined : "#ef4444",
+              borderColor: players.length === 0 ? undefined : "rgba(239,68,68,0.3)",
+            }}
+            title="Remove all players from the database">
+            <Trash2 size={14} />
+            <span style={{ fontSize: 11, fontWeight: 600 }}>Clear All</span>
           </button>
         </div>
       </div>

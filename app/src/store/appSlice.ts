@@ -80,6 +80,7 @@ interface AppState {
   backendStatus: string;
   fetchedPlayerCount: number;
   wsConnected: boolean;
+  ocrAuthenticated: boolean;
 }
 
 const initialState: AppState = {
@@ -94,6 +95,7 @@ const initialState: AppState = {
   backendStatus: "Checking...",
   fetchedPlayerCount: 0,
   wsConnected: false,
+  ocrAuthenticated: false,
 };
 
 export const appSlice = createSlice({
@@ -156,6 +158,10 @@ export const appSlice = createSlice({
     },
     setWsConnected: (state, action: PayloadAction<boolean>) => {
       state.wsConnected = action.payload;
+      if (!action.payload) state.ocrAuthenticated = false;
+    },
+    setOcrAuthenticated: (state, action: PayloadAction<boolean>) => {
+      state.ocrAuthenticated = action.payload;
     },
   },
 });
@@ -175,6 +181,7 @@ export const {
   setBackendStatus,
   setFetchedPlayerCount,
   setWsConnected,
+  setOcrAuthenticated,
 } = appSlice.actions;
 
 export default appSlice.reducer;

@@ -43,7 +43,9 @@ export default function Dashboard() {
     windowList,
     cameraList,
     backendOk,
-    backendStatus
+    backendStatus,
+    wsConnected,
+    ocrAuthenticated,
   } = useSelector((state: RootState) => state.app);
 
   const [isRefreshingWindows, setIsRefreshingWindows] = useState(false);
@@ -270,13 +272,30 @@ export default function Dashboard() {
           <div className="section-header">
             <Activity size={14} className="icon" /> System Status
           </div>
-          <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10 }}>
-            <span className={`status-dot ${backendOk ? "online" : "error"}`} />
-            <span style={{ fontSize: 12, color: backendOk ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
-              {backendOk ? "Backend Ready" : "Backend Unavailable"}
-            </span>
+          <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+            {/* OCR Backend (Rust) */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className={`status-dot ${backendOk ? "online" : "error"}`} />
+              <span style={{ fontSize: 12, color: backendOk ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
+                {backendOk ? "OCR Engine Ready" : "OCR Engine Unavailable"}
+              </span>
+            </div>
+            {/* Server Connection */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className={`status-dot ${wsConnected ? "online" : isRunning ? "warning" : "offline"}`} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: wsConnected ? "var(--green)" : isRunning ? "var(--yellow, #f59e0b)" : "var(--text-muted)" }}>
+                {wsConnected ? "Server Connected" : isRunning ? "Connecting..." : "Server Disconnected"}
+              </span>
+            </div>
+            {/* OCR Auth */}
+            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+              <span className={`status-dot ${ocrAuthenticated ? "online" : wsConnected ? "warning" : "offline"}`} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: ocrAuthenticated ? "var(--green)" : wsConnected ? "var(--yellow, #f59e0b)" : "var(--text-muted)" }}>
+                {ocrAuthenticated ? "Authenticated" : wsConnected ? "Authenticating..." : "Not Authenticated"}
+              </span>
+            </div>
           </div>
-          <p style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>{backendStatus}</p>
+          <p style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5, marginTop: 8 }}>{backendStatus}</p>
         </div>
 
         {/* Input Source Card */}

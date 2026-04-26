@@ -9,10 +9,11 @@ use rust_socketio::Payload;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{interval, Duration};
+use urlencoding::encode as url_encode;
 
 // ── State ────────────────────────────────────────────────────────────
 
@@ -29,6 +30,11 @@ struct OcrState {
     running: AtomicBool,
     /// True while Socket.io is connected and authenticated.
     sio_connected: AtomicBool,
+    /// Monotonically increasing generation. Each call to start_ocr() increments this.
+    /// Async loops capture their generation at start; if a later start_ocr() bumps it,
+    /// the old loops detect they've been superseded and exit silently without touching
+    /// shared state. Prevents races where a stale loop wipes a fresh loop's state.
+    loop_generation: AtomicU64,
     matcher: Mutex<matcher::FuzzyMatcher>,
     /// Players fetched from server API — used for WebSocket player ID lookup.
     fetched_players: Mutex<Vec<Player>>,
@@ -864,9 +870,18 @@ async fn start_ocr(
 
     let state_arc = state.inner().clone();
 
-    // Reset dedup so the first detection always sends
+    // Claim a new generation. Any previous async loop still alive will
+    // see its captured generation no longer matches and exit silently.
+    let my_gen = state_arc.loop_generation.fetch_add(1, Ordering::SeqCst) + 1;
+
+    // Reset all shared state so this run starts clean. The generation bump
+    // above guarantees the old loops won't overwrite this state on their way out.
+    state_arc.sio_connected.store(false, Ordering::SeqCst);
+    if let Ok(mut guard) = state_arc.sio_client.lock() {
+        *guard = None;
+    }
     if let Ok(mut last) = state_arc.last_sent_player.lock() {
-        *last = None; // sentinel — first send always goes through
+        *last = None;
     }
     if let Ok(mut streak) = state_arc.no_match_streak.lock() {
         *streak = 0;
@@ -900,14 +915,9 @@ async fn start_ocr(
             }
         }
 
-        let server_url = config.server.ws_url.trim_end_matches('/').to_string();
         let state_ws = state_arc.clone();
         let app_ws = app.clone();
-        let tournament_id = config.server.tournament_id.clone();
-        let secret_key = config.server.secret_key.clone();
-        // Pass source_id only when source_mode is active.
-        // If source_id is empty (e.g. config predates this field), fall back to
-        // "01" and warn — prevents silent global-mode connection.
+        // Resolve source_id before building the URL.
         let source_id: Option<String> = if config.server.source_mode {
             if config.server.source_id.is_empty() {
                 let _ = app.emit("log", LogEvent {
@@ -921,14 +931,31 @@ async fn start_ocr(
         } else {
             None
         };
+
+        // Pass credentials as URL query params — server validates on connection,
+        // no Socket.IO auth event or ack needed. Far more reliable than emit_with_ack.
+        let base_url = config.server.ws_url.trim_end_matches('/');
+        let server_url = {
+            let mut url = format!(
+                "{}?ocrKey={}&tournamentId={}",
+                base_url,
+                url_encode(&config.server.secret_key),
+                url_encode(&config.server.tournament_id),
+            );
+            if let Some(ref sid) = source_id {
+                url.push_str(&format!("&sourceId={}", url_encode(sid)));
+            }
+            url
+        };
+
         tokio::spawn(async move {
-            run_socketio_loop(app_ws, state_ws, server_url, tournament_id, secret_key, source_id).await;
+            run_socketio_loop(app_ws, state_ws, server_url, source_id, my_gen).await;
         });
     }
 
     let app_ocr = app.clone();
     tokio::spawn(async move {
-        run_ocr_loop(app_ocr, state_arc).await;
+        run_ocr_loop(app_ocr, state_arc, my_gen).await;
     });
 
     Ok(CommandResult {
@@ -945,13 +972,16 @@ async fn run_socketio_loop(
     app: AppHandle,
     state: Arc<OcrState>,
     server_url: String,
-    tournament_id: String,
-    secret_key: String,
     source_id: Option<String>,
+    my_gen: u64,
 ) {
     let reconnect_delay = Duration::from_secs(5);
 
-    while state.running.load(Ordering::SeqCst) {
+    // Helper: are we still the current generation? If not, a newer start_ocr()
+    // has superseded us — exit silently without touching shared state.
+    let is_current = |state: &Arc<OcrState>| state.loop_generation.load(Ordering::SeqCst) == my_gen;
+
+    while state.running.load(Ordering::SeqCst) && is_current(&state) {
         let mode_label = match &source_id {
             Some(sid) => format!("source mode (Source {})", sid),
             None => "global mode".to_string(),
@@ -964,10 +994,26 @@ async fn run_socketio_loop(
             },
         );
 
-        // Clone handles for the event callbacks
-        let app_conn = app.clone();
-        let app_disc = app.clone();
+        // Create auth signalling state for this connection attempt.
+        // These are shared between the ocrAuthSuccess/Failed event handlers
+        // (registered in ClientBuilder) and the code that waits below.
+        let auth_result = Arc::new(tokio::sync::Notify::new());
+        let auth_success = Arc::new(AtomicBool::new(false));
+
+        // Clone handles for all event callbacks. Capture `my_gen` (Copy u64) so
+        // callbacks can verify they belong to the active generation.
+        let app_conn   = app.clone();
+        let app_disc   = app.clone();
+        let app_ok     = app.clone();
+        let app_fail   = app.clone();
         let state_disc = state.clone();
+        let state_ok   = state.clone();
+        let state_fail = state.clone();
+        let notify_ok   = auth_result.clone();
+        let notify_fail = auth_result.clone();
+        let success_ok  = auth_success.clone();
+        let source_id_log = source_id.clone();
+        let cb_gen = my_gen;
 
         let result = ClientBuilder::new(&server_url)
             .namespace("/")
@@ -975,13 +1021,10 @@ async fn run_socketio_loop(
                 let a = app_conn.clone();
                 async move {
                     let _ = a.emit("ws_status", serde_json::json!({ "connected": true }));
-                    let _ = a.emit(
-                        "log",
-                        LogEvent {
-                            level: "success".into(),
-                            message: "Socket.io connected to server".into(),
-                        },
-                    );
+                    let _ = a.emit("log", LogEvent {
+                        level: "success".into(),
+                        message: "Socket.io connected to server".into(),
+                    });
                 }
                 .boxed()
             })
@@ -989,16 +1032,70 @@ async fn run_socketio_loop(
                 let a = app_disc.clone();
                 let s = state_disc.clone();
                 async move {
-                    let _ = a.emit("ws_status", serde_json::json!({ "connected": false }));
-                    let _ = a.emit(
-                        "log",
-                        LogEvent {
+                    if s.loop_generation.load(Ordering::SeqCst) == cb_gen {
+                        let _ = a.emit("ws_status", serde_json::json!({ "connected": false }));
+                        let _ = a.emit("log", LogEvent {
                             level: "warning".into(),
                             message: "Socket.io disconnected from server".into(),
-                        },
-                    );
-                    // Signal the keep-alive loop to exit (will trigger reconnect)
-                    s.sio_connected.store(false, Ordering::SeqCst);
+                        });
+                        s.sio_connected.store(false, Ordering::SeqCst);
+                    }
+                }
+                .boxed()
+            })
+            // Server emits ocrAuthSuccess after processing ocrAuth (in addition to
+            // the ack callback). We listen for this event because rust_socketio v0.6
+            // does not reliably invoke emit_with_ack callbacks.
+            .on("ocrAuthSuccess", move |_payload, _client| {
+                let a = app_ok.clone();
+                let s = state_ok.clone();
+                let n = notify_ok.clone();
+                let sc = success_ok.clone();
+                let sid_log = source_id_log.clone();
+                async move {
+                    sc.store(true, Ordering::SeqCst);
+                    if s.loop_generation.load(Ordering::SeqCst) == cb_gen {
+                        s.sio_connected.store(true, Ordering::SeqCst);
+                        // Reset dedup so the first detection after auth always sends,
+                        // even if the same player was detected (and logged) before auth.
+                        if let Ok(mut last) = s.last_sent_player.lock() {
+                            *last = None;
+                        }
+                        let mode_label = match sid_log.as_deref() {
+                            Some(sid) => format!("source mode (Source {})", sid),
+                            None => "global mode".to_string(),
+                        };
+                        let _ = a.emit("log", LogEvent {
+                            level: "success".into(),
+                            message: format!("OCR authenticated — {}", mode_label),
+                        });
+                        let _ = a.emit("ocr_authenticated", ());
+                    }
+                    n.notify_one();
+                }
+                .boxed()
+            })
+            .on("ocrAuthFailed", move |payload, _client| {
+                let a = app_fail.clone();
+                let s = state_fail.clone();
+                let n = notify_fail.clone();
+                async move {
+                    if s.loop_generation.load(Ordering::SeqCst) == cb_gen {
+                        let msg = match &payload {
+                            Payload::Text(values) => values
+                                .first()
+                                .and_then(|v| v.get("message"))
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown reason")
+                                .to_string(),
+                            _ => "unknown reason".to_string(),
+                        };
+                        let _ = a.emit("log", LogEvent {
+                            level: "error".into(),
+                            message: format!("OCR auth rejected: {msg}"),
+                        });
+                    }
+                    n.notify_one();
                 }
                 .boxed()
             })
@@ -1007,143 +1104,77 @@ async fn run_socketio_loop(
 
         match result {
             Ok(client) => {
-                // Store client immediately so OCR loop can use it once auth succeeds
+                // A newer generation took over while we were connecting — bail out.
+                if !is_current(&state) {
+                    let _ = client.disconnect().await;
+                    break;
+                }
+
+                // Store client so the OCR loop can send events once auth succeeds.
                 {
                     let mut guard = state.sio_client.lock().unwrap();
                     *guard = Some(client.clone());
                 }
 
-                // Authenticate with server via ocrAuth event + ack callback.
-                // Include sourceId when source_mode is active so the server
-                // routes OCR events to the isolated source channel.
-                let mut auth_payload = serde_json::json!({
-                    "secretKey": secret_key,
-                    "tournamentId": tournament_id,
-                });
-                if let Some(ref sid) = source_id {
-                    auth_payload["sourceId"] = serde_json::Value::String(sid.clone());
+                // Credentials were passed in the URL query string — the server validates
+                // them in io.on("connection") and immediately emits ocrAuthSuccess back.
+                // No emit_with_ack, no event round-trip, no ack callback issues.
+                // Just wait for the ocrAuthSuccess event (registered in ClientBuilder).
+                let ack_wait = tokio::time::timeout(
+                    Duration::from_secs(15),
+                    auth_result.notified(),
+                ).await;
+
+                if ack_wait.is_err() {
+                    let _ = app.emit("log", LogEvent {
+                        level: "error".into(),
+                        message: "ocrAuth timed out — server did not respond within 15s".into(),
+                    });
                 }
-
-                let app_ack = app.clone();
-                let state_ack = state.clone();
-                let source_id_log = source_id.clone();
-
-                let auth_result = Arc::new(tokio::sync::Notify::new());
-                let auth_success = Arc::new(AtomicBool::new(false));
-                let notify_clone = auth_result.clone();
-                let success_clone = auth_success.clone();
-
-                if let Err(e) = client
-                    .emit_with_ack(
-                        "ocrAuth",
-                        auth_payload,
-                        Duration::from_secs(10),
-                        move |payload: Payload, _client: SioClient| {
-                            let a = app_ack.clone();
-                            let s = state_ack.clone();
-                            let n = notify_clone.clone();
-                            let sc = success_clone.clone();
-                            let sid_log = source_id_log.clone();
-                            async move {
-                                // Parse ack response — the server callback({ success, message })
-                                // arrives as Payload::Text([Array([Object])]) due to Socket.io
-                                // ack wrapping. Unwrap all layers to get the inner object.
-                                let response: Option<serde_json::Value> = match &payload {
-                                    Payload::Text(values) => {
-                                        let mut v = values.first().cloned();
-                                        while let Some(serde_json::Value::Array(arr)) = &v {
-                                            v = arr.first().cloned();
-                                        }
-                                        if let Some(serde_json::Value::String(s)) = &v {
-                                            v = serde_json::from_str(s).ok();
-                                        }
-                                        v
-                                    }
-                                    #[allow(unreachable_patterns)]
-                                    _ => None,
-                                };
-
-                                let ok = response.as_ref()
-                                    .and_then(|v| v.get("success"))
-                                    .and_then(|v| v.as_bool())
-                                    .unwrap_or(false);
-
-                                if ok {
-                                    s.sio_connected.store(true, Ordering::SeqCst);
-                                    sc.store(true, Ordering::SeqCst);
-                                    let mode_label = match &sid_log {
-                                        Some(sid) => format!("source mode (Source {})", sid),
-                                        None => "global mode".to_string(),
-                                    };
-                                    let _ = a.emit(
-                                        "log",
-                                        LogEvent {
-                                            level: "success".into(),
-                                            message: format!("OCR authenticated — {}", mode_label),
-                                        },
-                                    );
-                                } else {
-                                    let msg = response.as_ref()
-                                        .and_then(|v| v.get("message"))
-                                        .and_then(|v| v.as_str())
-                                        .unwrap_or("unknown reason")
-                                        .to_string();
-                                    let _ = a.emit(
-                                        "log",
-                                        LogEvent {
-                                            level: "error".into(),
-                                            message: format!("OCR auth rejected: {msg}"),
-                                        },
-                                    );
-                                }
-                                n.notify_one();
-                            }
-                            .boxed()
-                        },
-                    )
-                    .await
-                {
-                    let _ = app.emit(
-                        "log",
-                        LogEvent {
-                            level: "error".into(),
-                            message: format!("Failed to emit ocrAuth: {e}"),
-                        },
-                    );
-                    if let Ok(mut g) = state.sio_client.lock() { *g = None; }
-                    let _ = client.disconnect().await;
-                    tokio::time::sleep(reconnect_delay).await;
-                    continue;
-                }
-
-                // Wait for ack
-                auth_result.notified().await;
 
                 if !auth_success.load(Ordering::SeqCst) {
-                    // Auth failed — stop trying
-                    if let Ok(mut g) = state.sio_client.lock() { *g = None; }
+                    // Auth failed — stop trying. Disconnect this client.
+                    // Only mutate shared state if we're still the current generation —
+                    // a newer start_ocr() may have already taken over and we must not
+                    // wipe its state or kill its `running` flag.
                     let _ = client.disconnect().await;
-                    state.running.store(false, Ordering::SeqCst);
+                    if is_current(&state) {
+                        if let Ok(mut g) = state.sio_client.lock() { *g = None; }
+                        state.running.store(false, Ordering::SeqCst);
+                    }
                     break;
                 }
 
-                // Stay alive while OCR is running and connected
+                // Stay alive while OCR is running, connected, and we're still the
+                // active generation. If a new start_ocr() bumps the generation, exit fast.
                 while state.running.load(Ordering::SeqCst)
                     && state.sio_connected.load(Ordering::SeqCst)
+                    && is_current(&state)
                 {
                     tokio::time::sleep(Duration::from_secs(1)).await;
                 }
 
-                // Cleanup
-                state.sio_connected.store(false, Ordering::SeqCst);
-                if let Ok(mut guard) = state.sio_client.lock() {
-                    *guard = None;
-                }
-                if let Ok(mut lp) = state.last_sent_player.lock() {
-                    *lp = None;
-                }
+                // Always disconnect this client — this triggers server-side
+                // socket.on("disconnect") which emits ocrOffline to the controller.
                 let _ = client.disconnect().await;
-                let _ = app.emit("ws_status", serde_json::json!({ "connected": false }));
+
+                // Only mutate shared state if we're still the current generation.
+                // A superseded loop must not touch sio_connected / sio_client / last_sent_player —
+                // those now belong to the new generation's loop.
+                if is_current(&state) {
+                    let _ = app.emit("ws_status", serde_json::json!({ "connected": false }));
+                    // Only reset shared state when reconnecting (running = true). When the
+                    // user stopped (running = false), start_ocr() owns the next reset.
+                    if state.running.load(Ordering::SeqCst) {
+                        state.sio_connected.store(false, Ordering::SeqCst);
+                        if let Ok(mut guard) = state.sio_client.lock() {
+                            *guard = None;
+                        }
+                        if let Ok(mut lp) = state.last_sent_player.lock() {
+                            *lp = None;
+                        }
+                    }
+                }
             }
             Err(e) => {
                 let _ = app.emit(
@@ -1156,28 +1187,35 @@ async fn run_socketio_loop(
             }
         }
 
-        if !state.running.load(Ordering::SeqCst) {
+        // Exit if user stopped OR a newer generation has taken over.
+        if !state.running.load(Ordering::SeqCst) || !is_current(&state) {
             break;
         }
 
         tokio::time::sleep(reconnect_delay).await;
     }
 
-    // Final cleanup
-    state.sio_connected.store(false, Ordering::SeqCst);
-    if let Ok(mut guard) = state.sio_client.lock() {
-        *guard = None;
-    }
-    if let Ok(mut lp) = state.last_sent_player.lock() {
-        *lp = None;
+    // Final cleanup — only if we're still the current generation.
+    // A superseded loop must NEVER wipe shared state on its way out.
+    if is_current(&state) {
+        state.sio_connected.store(false, Ordering::SeqCst);
+        if let Ok(mut guard) = state.sio_client.lock() {
+            *guard = None;
+        }
+        if let Ok(mut lp) = state.last_sent_player.lock() {
+            *lp = None;
+        }
     }
 }
 
-async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
-    // Reset last sent player so the first detection always sends
-    if let Ok(mut last) = state.last_sent_player.lock() {
-        *last = None;
-    }
+async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
+    // Helper: are we still the current generation? If not, a newer start_ocr()
+    // has superseded us — exit silently without touching shared state.
+    let is_current = |state: &Arc<OcrState>| state.loop_generation.load(Ordering::SeqCst) == my_gen;
+
+    // start_ocr() already reset last_sent_player for the new generation.
+    // Don't reset here — that could race with the new generation if this is
+    // a stale loop being torn down.
 
     // Load config
     let config: AppConfig = match load_config() {
@@ -1190,13 +1228,37 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                     message: format!("Failed to load config: {e}"),
                 },
             );
-            state.running.store(false, Ordering::SeqCst);
-            let _ = app.emit("ocr_stopped", ());
+            // Only kill running and emit ocr_stopped if we're still the active loop.
+            if is_current(&state) {
+                state.running.store(false, Ordering::SeqCst);
+                let _ = app.emit("ocr_stopped", ());
+            }
             return;
         }
     };
 
-    // Log how many players are loaded for ID lookup
+    let capture_interval = config.capture.interval_seconds.max(0.1);
+    let confidence_threshold = config.ocr.confidence_threshold as f32;
+
+    // If server is enabled, wait for auth to complete before starting detection.
+    // This prevents detection logs from spamming before the connection is ready.
+    if config.server.enabled && !config.server.ws_url.is_empty() {
+        let _ = app.emit("log", LogEvent {
+            level: "info".into(),
+            message: "Waiting for server connection...".into(),
+        });
+        while state.running.load(Ordering::SeqCst)
+            && is_current(&state)
+            && !state.sio_connected.load(Ordering::SeqCst)
+        {
+            tokio::time::sleep(Duration::from_millis(200)).await;
+        }
+        if !state.running.load(Ordering::SeqCst) || !is_current(&state) {
+            return;
+        }
+    }
+
+    // Log player count only after connection is ready (or if no server)
     {
         let fp_count = state.fetched_players.lock().map(|fp| fp.len()).unwrap_or(0);
         let _ = app.emit("log", LogEvent {
@@ -1205,9 +1267,6 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                 if fp_count == 0 { " — click Fetch Players in Settings first!" } else { "" }),
         });
     }
-
-    let capture_interval = config.capture.interval_seconds.max(0.1);
-    let confidence_threshold = config.ocr.confidence_threshold as f32;
 
     let _ = app.emit(
         "log",
@@ -1219,7 +1278,7 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
 
     let mut ticker = interval(Duration::from_secs_f64(capture_interval));
 
-    while state.running.load(Ordering::SeqCst) {
+    while state.running.load(Ordering::SeqCst) && is_current(&state) {
         ticker.tick().await;
 
         // Capture frame based on input source type
@@ -1410,13 +1469,20 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                     },
                 );
 
-                // Send to server — only after ocrAuth is confirmed (sio_connected = true).
-                // Gating on sio_connected rather than just sio_client prevents a race
-                // where the socket is connected but auth hasn't completed: the server
-                // would drop the event (role != "OCR"), but last_sent_player would still
-                // be updated, causing the next scan of the same player to be silently
-                // skipped by Rust-side dedup even after auth succeeds.
-                let client_opt = if state.sio_connected.load(Ordering::SeqCst) {
+                // Update dedup at log time so we don't spam the same detection
+                // repeatedly before auth completes. It gets reset to None when
+                // ocrAuthSuccess fires, ensuring the player is sent to the server
+                // on the first detection after authentication.
+                if let Ok(mut last) = state.last_sent_player.lock() {
+                    *last = Some(effective_player_id.clone());
+                }
+
+                // Send to server — only after ocrAuth is confirmed (sio_connected = true)
+                // AND we're still the active generation. Gating on generation prevents a
+                // stale OCR loop from overwriting last_sent_player after a new start_ocr()
+                // has reset it. Gating on sio_connected prevents a race where the socket
+                // is connected but auth hasn't completed.
+                let client_opt = if is_current(&state) && state.sio_connected.load(Ordering::SeqCst) {
                     state.sio_client.lock().ok().and_then(|g| g.clone())
                 } else {
                     None
@@ -1440,25 +1506,21 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>) {
                             let _ = client.emit("noMatch", serde_json::json!({})).await;
                         }
                     }
-                    // Update dedup state ONLY when we actually sent to the server.
-                    // Updating unconditionally (even when client was None or not yet authed)
-                    // caused the next identical scan to be silently skipped.
-                    if let Ok(mut last) = state.last_sent_player.lock() {
-                        *last = Some(effective_player_id);
-                    }
                 }
             }
         }
     }
 
-    let _ = app.emit(
-        "log",
-        LogEvent {
+    // Only emit the log if we're still the current generation — a superseded loop
+    // must not log "stopped" when OCR is still running under a new generation.
+    // Note: ocr_stopped and ws_status are emitted immediately by stop_ocr(), so
+    // we don't re-emit them here.
+    if is_current(&state) {
+        let _ = app.emit("log", LogEvent {
             level: "warning".into(),
             message: "OCR capture stopped".into(),
-        },
-    );
-    let _ = app.emit("ocr_stopped", ());
+        });
+    }
 }
 
 fn send_preview(app: &AppHandle, image_b64: &str, detections: &[matcher::MatchResult]) {
@@ -1475,9 +1537,23 @@ fn send_preview(app: &AppHandle, image_b64: &str, detections: &[matcher::MatchRe
     );
 }
 
+/// Returns the current OCR running state. Used by the frontend on mount/reload
+/// to sync UI state with the actual Rust state — survives webview reloads,
+/// HMR, and tab switches.
 #[tauri::command]
-async fn stop_ocr(state: tauri::State<'_, Arc<OcrState>>) -> Result<CommandResult, String> {
+fn is_ocr_running(state: tauri::State<'_, Arc<OcrState>>) -> bool {
+    state.running.load(Ordering::SeqCst)
+}
+
+#[tauri::command]
+async fn stop_ocr(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<OcrState>>,
+) -> Result<CommandResult, String> {
     if state.running.swap(false, Ordering::SeqCst) {
+        // Immediately tell the frontend state is clean — don't wait for async loops.
+        let _ = app.emit("ws_status", serde_json::json!({ "connected": false }));
+        let _ = app.emit("ocr_stopped", ());
         Ok(CommandResult {
             success: true,
             message: "OCR capture stopped".into(),
@@ -1757,6 +1833,7 @@ pub fn run() {
             app.manage(Arc::new(OcrState {
                 running: AtomicBool::new(false),
                 sio_connected: AtomicBool::new(false),
+                loop_generation: AtomicU64::new(0),
                 matcher: Mutex::new(matcher::FuzzyMatcher::new(players, threshold)),
                 fetched_players: Mutex::new(Vec::new()),
                 sio_client: Mutex::new(None),
@@ -1796,6 +1873,7 @@ pub fn run() {
             fetch_players_from_server,
             start_ocr,
             stop_ocr,
+            is_ocr_running,
             check_backend,
             check_server_health,
             get_region_selector_image,

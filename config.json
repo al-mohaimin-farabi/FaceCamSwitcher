@@ -1,12 +1,12 @@
 {
   "input_source": {
     "type": "window",
-    "window_hwnd": 2886050,
-    "window_title": "*X2.NRXJOD - Notepad",
+    "window_hwnd": 592792,
+    "window_title": "*RHK.BLADE - Notepad",
     "window_region": {
-      "left": 5,
-      "top": 82,
-      "width": 123,
+      "left": 4,
+      "top": 80,
+      "width": 109,
       "height": 37
     },
     "camera_index": 2
@@ -19,7 +19,7 @@
     "tournament_id": "cmoeu4xwt00012tqvtlfa9jz6",
     "secret_key": "41de4a14327bdb6e84bc0667575d52048a164e01ffc0b39520a27223937ff8b3",
     "source_mode": true,
-    "source_id": "01"
+    "source_id": "02"
   },
   "ocr": {
     "language": "en",
