@@ -1,25 +1,30 @@
 {
   "input_source": {
     "type": "window",
-    "window_hwnd": 94898178,
-    "window_title": "*RFX - Notepad",
+    "window_hwnd": 329488,
+    "window_title": "*JB - Notepad",
     "window_region": {
-      "left": 12,
+      "left": 9,
       "top": 88,
-      "width": 50,
-      "height": 22
+      "width": 51,
+      "height": 24
     },
     "camera_index": 2
   },
   "vmix": {
-    "ip": "192.168.1.100",
+    "ip": "192.168.68.100",
     "port": 8088,
     "layer": 7,
-    "target_sources": [],
-    "debounce_ms": 1500,
-    "clear_timeout_ms": 5000
+    "target_sources": [
+      "OB1",
+      "OB2"
+    ]
   },
-  "player_camera_map": {},
+  "team_camera_map": {
+    "JB": "JB",
+    "TEC": "TEC",
+    "RFX": "RFX"
+  },
   "ocr": {
     "language": "en",
     "confidence_threshold": 0.6,
@@ -32,17 +37,17 @@
     "debug_screenshot_dir": "debug_captures"
   },
   "saved_regions": {
-    "@JARV!S - Discord": {
-      "left": 59,
-      "top": 325,
-      "width": 222,
-      "height": 37
-    },
     "*I want to make a Stand-alone FaceCa - Notepad": {
       "left": 9,
       "top": 249,
       "width": 235,
       "height": 43
+    },
+    "@JARV!S - Discord": {
+      "left": 59,
+      "top": 325,
+      "width": 222,
+      "height": 37
     }
   }
 }
