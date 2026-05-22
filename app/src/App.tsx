@@ -1,9 +1,9 @@
 import { useState, useEffect } from "react";
 import Dashboard from "./pages/Dashboard";
-import PlayerNames from "./pages/PlayerNames";
-import Settings from "./pages/Settings";
+import Teams from "./pages/Teams";
 import Mapping from "./pages/Mapping";
-import { LayoutDashboard, Users, Settings as SettingsIcon, Video } from "lucide-react";
+import Settings from "./pages/Settings";
+import { LayoutDashboard, Settings as SettingsIcon, Video, Shield } from "lucide-react";
 import { useDispatch } from "react-redux";
 import { listen } from "@tauri-apps/api/event";
 import { invoke } from "@tauri-apps/api/core";
@@ -17,9 +17,10 @@ import {
   setLastVmixAction,
   type PreviewData,
   type VmixAction,
+  // setTeamCameraMap imported by Mapping.tsx directly
 } from "./store/appSlice";
 
-type Page = "dashboard" | "players" | "mapping" | "settings";
+type Page = "dashboard" | "teams" | "mapping" | "settings";
 
 function App() {
   const [currentPage, setCurrentPage] = useState<Page>("dashboard");
@@ -114,7 +115,7 @@ function App() {
         <div className="tab-bar" style={{ marginLeft: "auto", padding: "4px" }}>
           {([
             { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={16} /> },
-            { id: "players",   label: "Players",   icon: <Users size={16} /> },
+            { id: "teams",     label: "Teams",     icon: <Shield size={16} /> },
             { id: "mapping",   label: "Mapping",   icon: <Video size={16} /> },
             { id: "settings",  label: "Settings",  icon: <SettingsIcon size={16} /> },
           ] as { id: Page; label: string; icon: React.ReactNode }[]).map(({ id, label, icon }) => (
@@ -133,7 +134,7 @@ function App() {
       {/* ── Page Content ────────────────────────── */}
       <main style={{ flex: 1, overflow: "hidden", position: "relative" }}>
         {currentPage === "dashboard" && <Dashboard />}
-        {currentPage === "players"   && <PlayerNames />}
+        {currentPage === "teams"     && <Teams />}
         {currentPage === "mapping"   && <Mapping />}
         {currentPage === "settings"  && <Settings />}
       </main>

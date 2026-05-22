@@ -147,9 +147,10 @@ struct AppConfig {
     input_source: InputSource,
     #[serde(default)]
     vmix: VmixConfig,
-    /// Maps matched player name (e.g. "RHK.BLADE") to vMix camera input name (e.g. "Camera 1").
+    /// Maps team tag (e.g. "RHK") to vMix camera input name (e.g. "Camera 1").
+    /// The tag is the prefix before the first "." in the matched player name.
     #[serde(default)]
-    player_camera_map: std::collections::HashMap<String, String>,
+    team_camera_map: std::collections::HashMap<String, String>,
     ocr: OcrConfig,
     capture: CaptureConfig,
     #[serde(default)]
@@ -189,7 +190,7 @@ fn ensure_default_config(dir: &PathBuf) {
     "debounce_ms": 1500,
     "clear_timeout_ms": 5000
   },
-  "player_camera_map": {},
+  "team_camera_map": {},
   "ocr": {
     "language": "en",
     "confidence_threshold": 0.6,
@@ -205,9 +206,9 @@ fn ensure_default_config(dir: &PathBuf) {
         let _ = fs::write(&config_path, default_config);
     }
 
-    let players_path = dir.join("Players Name.txt");
-    if !players_path.exists() {
-        let _ = fs::write(&players_path, "# Add player names below, one per line\n");
+    let team_tags_path = dir.join("Team Tag.txt");
+    if !team_tags_path.exists() {
+        let _ = fs::write(&team_tags_path, "# Add team tags below, one per line (e.g. RHK)\n");
     }
 }
 
@@ -241,8 +242,8 @@ fn get_config_path() -> PathBuf {
     get_facecam_dir().join("config.json")
 }
 
-fn get_players_path() -> PathBuf {
-    get_facecam_dir().join("Players Name.txt")
+fn get_team_tags_path() -> PathBuf {
+    get_facecam_dir().join("Team Tag.txt")
 }
 
 fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
@@ -643,129 +644,82 @@ fn enumerate_directshow_video_devices() -> Result<Vec<CameraInfo>, String> {
     }
 }
 
-// ── Player Name Commands ──────────────────────────────────────────────
+// ── Team Tag Commands ─────────────────────────────────────────────────
 
 #[tauri::command]
-fn load_players() -> Result<Vec<String>, String> {
-    let path = get_players_path();
+fn load_team_tags() -> Result<Vec<String>, String> {
+    let path = get_team_tags_path();
     if !path.exists() {
         let _ = fs::write(&path, "");
         return Ok(vec![]);
     }
     let content =
-        fs::read_to_string(&path).map_err(|e| format!("Failed to read players file: {}", e))?;
-    let names: Vec<String> = content
+        fs::read_to_string(&path).map_err(|e| format!("Failed to read Team Tag.txt: {}", e))?;
+    let tags: Vec<String> = content
         .lines()
-        .map(|l| l.trim().to_string())
+        .map(|l| l.trim().to_uppercase())
         .filter(|l| !l.is_empty() && !l.starts_with('#'))
         .collect();
-    Ok(names)
+    Ok(tags)
 }
 
 #[tauri::command]
-fn save_players(
-    players: Vec<String>,
+fn save_team_tags(
+    tags: Vec<String>,
     state: tauri::State<'_, Arc<OcrState>>,
 ) -> Result<CommandResult, String> {
-    let path = get_players_path();
-    let content = players.join("\n");
-    fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
+    let path = get_team_tags_path();
+    let content = tags.join("\n");
+    fs::write(&path, content).map_err(|e| format!("Failed to write Team Tag.txt: {}", e))?;
     if let Ok(mut m) = state.matcher.lock() {
-        m.update_players(players.clone());
+        m.update_players(tags.clone());
     }
     Ok(CommandResult {
         success: true,
-        message: format!("Saved {} player name(s)", players.len()),
+        message: format!("Saved {} team tag(s)", tags.len()),
     })
 }
 
 #[tauri::command]
-fn add_player(
-    name: String,
+fn add_team_tag(
+    tag: String,
     state: tauri::State<'_, Arc<OcrState>>,
 ) -> Result<CommandResult, String> {
-    let path = get_players_path();
-    let mut names = load_players().unwrap_or_default();
-
-    let trimmed = name.trim().to_uppercase();
+    let mut tags = load_team_tags().unwrap_or_default();
+    let trimmed = tag.trim().to_uppercase();
     if trimmed.is_empty() {
-        return Ok(CommandResult {
-            success: false,
-            message: "Player name cannot be empty".into(),
-        });
+        return Ok(CommandResult { success: false, message: "Team tag cannot be empty".into() });
     }
-
-    if names.iter().any(|n| n.to_uppercase() == trimmed) {
-        return Ok(CommandResult {
-            success: false,
-            message: format!("'{}' already exists", trimmed),
-        });
+    if tags.iter().any(|t| t == &trimmed) {
+        return Ok(CommandResult { success: false, message: format!("'{}' already exists", trimmed) });
     }
-
-    names.push(trimmed.clone());
-    let content = names.join("\n");
-    fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
+    tags.push(trimmed.clone());
+    tags.sort();
+    let path = get_team_tags_path();
+    fs::write(&path, tags.join("\n")).map_err(|e| format!("Failed to write Team Tag.txt: {}", e))?;
     if let Ok(mut m) = state.matcher.lock() {
-        m.update_players(names);
+        m.update_players(tags);
     }
     Ok(CommandResult { success: true, message: format!("Added '{}'", trimmed) })
 }
 
 #[tauri::command]
-fn remove_player(
-    name: String,
+fn remove_team_tag(
+    tag: String,
     state: tauri::State<'_, Arc<OcrState>>,
 ) -> Result<CommandResult, String> {
-    let path = get_players_path();
-    let mut names = load_players().unwrap_or_default();
-    let before = names.len();
-    names.retain(|n| n.to_uppercase() != name.to_uppercase());
-    if names.len() == before {
-        return Ok(CommandResult { success: false, message: format!("'{}' not found", name) });
+    let mut tags = load_team_tags().unwrap_or_default();
+    let before = tags.len();
+    tags.retain(|t| t.to_uppercase() != tag.to_uppercase());
+    if tags.len() == before {
+        return Ok(CommandResult { success: false, message: format!("'{}' not found", tag) });
     }
-    let content = names.join("\n");
-    fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
+    let path = get_team_tags_path();
+    fs::write(&path, tags.join("\n")).map_err(|e| format!("Failed to write Team Tag.txt: {}", e))?;
     if let Ok(mut m) = state.matcher.lock() {
-        m.update_players(names);
+        m.update_players(tags);
     }
-    Ok(CommandResult { success: true, message: format!("Removed '{}'", name) })
-}
-
-#[tauri::command]
-fn rename_player(
-    old_name: String,
-    new_name: String,
-    state: tauri::State<'_, Arc<OcrState>>,
-) -> Result<CommandResult, String> {
-    let path = get_players_path();
-    let mut names = load_players().unwrap_or_default();
-    let trimmed_new = new_name.trim().to_uppercase();
-    if trimmed_new.is_empty() {
-        return Ok(CommandResult { success: false, message: "New name cannot be empty".into() });
-    }
-    let pos = names.iter().position(|n| n.to_uppercase() == old_name.to_uppercase());
-    match pos {
-        None => Ok(CommandResult { success: false, message: format!("'{}' not found", old_name) }),
-        Some(idx) => {
-            if names.iter().enumerate().any(|(i, n)| i != idx && n.to_uppercase() == trimmed_new) {
-                return Ok(CommandResult {
-                    success: false,
-                    message: format!("'{}' already exists", trimmed_new),
-                });
-            }
-            names[idx] = trimmed_new.clone();
-            let content = names.join("\n");
-            fs::write(&path, content)
-                .map_err(|e| format!("Failed to write players file: {}", e))?;
-            if let Ok(mut m) = state.matcher.lock() {
-                m.update_players(names);
-            }
-            Ok(CommandResult {
-                success: true,
-                message: format!("Renamed '{}' → '{}'", old_name, trimmed_new),
-            })
-        }
-    }
+    Ok(CommandResult { success: true, message: format!("Removed '{}'", tag) })
 }
 
 // ── OCR Commands ─────────────────────────────────────────────────────
@@ -817,7 +771,7 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
     let debounce = Duration::from_millis(config.vmix.debounce_ms);
     let clear_timeout = Duration::from_millis(config.vmix.clear_timeout_ms);
     let vmix = config.vmix.clone();
-    let cam_map = config.player_camera_map.clone();
+    let cam_map = config.team_camera_map.clone();
 
     let _ = app.emit("log", LogEvent { level: "info".into(), message: "OCR engine started (Rust native ONNX)".into() });
 
@@ -912,9 +866,10 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
                 // Same name as pending — check if debounce window elapsed
                 if let Some(since) = pending_since {
                     if now.duration_since(since) >= debounce {
-                        // Stable — look up vMix camera input
+                        // matched name IS the team tag — look up in team_camera_map
+                        let team_tag = name.to_uppercase();
                         let camera_input = cam_map.iter()
-                            .find(|(k, _)| k.to_uppercase() == name.to_uppercase())
+                            .find(|(k, _)| k.to_uppercase() == team_tag)
                             .map(|(_, v)| v.clone());
 
                         if let Some(ref cam) = camera_input {
@@ -950,7 +905,7 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
                                             message: format!("[vMix] → {} on {} source(s) — Layer {}", cam_clone, vmix_clone.target_sources.len(), vmix_clone.layer),
                                         });
                                         let _ = app_clone.emit("vmix_action", serde_json::json!({
-                                            "player": name,
+                                            "player": team_tag,
                                             "camera": cam_clone,
                                             "layer": vmix_clone.layer,
                                             "cleared": false
@@ -972,14 +927,14 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
                                 }
                             }
                         } else {
-                            // Name matched but not in mapping table
+                            // Team has no camera mapping
                             let changed = state.last_sent_camera.lock()
                                 .map(|l| l.is_some())
                                 .unwrap_or(false);
                             if changed {
                                 let _ = app.emit("log", LogEvent {
                                     level: "warning".into(),
-                                    message: format!("[vMix] \"{}\" matched but has no camera mapping — configure in Mapping tab", name),
+                                    message: format!("[vMix] Team \"{}\" has no camera mapping — configure in Mapping tab", team_tag),
                                 });
                             }
                         }
@@ -1240,7 +1195,7 @@ pub fn run() {
                 false
             };
 
-            let players: Vec<String> = load_players().unwrap_or_default();
+            let players: Vec<String> = load_team_tags().unwrap_or_default();
             let threshold = match load_config() {
                 Ok(c) => c.ocr.fuzzy_match_threshold as f64,
                 Err(_) => 70.0,
@@ -1277,11 +1232,10 @@ pub fn run() {
             list_cameras,
             open_window_region_selector,
             open_camera_region_selector,
-            load_players,
-            save_players,
-            add_player,
-            remove_player,
-            rename_player,
+            load_team_tags,
+            save_team_tags,
+            add_team_tag,
+            remove_team_tag,
             start_ocr,
             stop_ocr,
             is_ocr_running,
