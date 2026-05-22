@@ -20,6 +20,7 @@ import {
   Target,
   Video,
   RotateCcw,
+  Layers,
 } from "lucide-react";
 
 interface WindowInfo {
@@ -44,8 +45,8 @@ export default function Dashboard() {
     cameraList,
     backendOk,
     backendStatus,
-    wsConnected,
-    ocrAuthenticated,
+    lastVmixAction,
+    vmixTestResult,
   } = useSelector((state: RootState) => state.app);
 
   const [isRefreshingWindows, setIsRefreshingWindows] = useState(false);
@@ -56,14 +57,12 @@ export default function Dashboard() {
   const srcType = config?.input_source?.type ?? "window";
 
   useEffect(() => {
-    // Fire all startup fetches in parallel — no sequential waiting
     const tasks: Promise<any>[] = [checkBackend()];
-    if (!config)               tasks.push(loadConfig());
+    if (!config)                tasks.push(loadConfig());
     if (windowList.length === 0) tasks.push(handleRefreshWindows());
     if (cameraList.length === 0) tasks.push(handleRefreshCameras());
     Promise.all(tasks);
 
-    // Reload config when region is saved from the selector window
     const unlisten = listen("region-saved", () => { loadConfig(); });
     return () => { unlisten.then(fn => fn()); };
   }, []);
@@ -254,10 +253,10 @@ export default function Dashboard() {
 
   const src = config?.input_source;
 
-  // Determine if the Start button should be enabled
+  // Start button requires OCR engine + (for camera mode) a camera selection
   const canStart = backendOk && (
     srcType === "window"
-      ? true // window capture works even without a selection (falls back to screen)
+      ? true
       : (src?.camera_index !== undefined && cameraList.length > 0)
   );
 
@@ -273,27 +272,31 @@ export default function Dashboard() {
             <Activity size={14} className="icon" /> System Status
           </div>
           <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
-            {/* OCR Backend (Rust) */}
+            {/* OCR Engine */}
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
               <span className={`status-dot ${backendOk ? "online" : "error"}`} />
               <span style={{ fontSize: 12, color: backendOk ? "var(--green)" : "var(--red)", fontWeight: 600 }}>
                 {backendOk ? "OCR Engine Ready" : "OCR Engine Unavailable"}
               </span>
             </div>
-            {/* Server Connection */}
+            {/* vMix connection (from last test) */}
             <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className={`status-dot ${wsConnected ? "online" : isRunning ? "warning" : "offline"}`} />
-              <span style={{ fontSize: 12, fontWeight: 600, color: wsConnected ? "var(--green)" : isRunning ? "var(--yellow, #f59e0b)" : "var(--text-muted)" }}>
-                {wsConnected ? "Server Connected" : isRunning ? "Connecting..." : "Server Disconnected"}
+              <span className={`status-dot ${vmixTestResult === null ? "offline" : vmixTestResult.ok ? "online" : "error"}`} />
+              <span style={{ fontSize: 12, fontWeight: 600, color: vmixTestResult === null ? "var(--text-muted)" : vmixTestResult.ok ? "var(--green)" : "var(--red)" }}>
+                {vmixTestResult === null ? "vMix — Not Tested" : vmixTestResult.ok ? "vMix Connected" : "vMix Unreachable"}
               </span>
             </div>
-            {/* OCR Auth */}
-            <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
-              <span className={`status-dot ${ocrAuthenticated ? "online" : wsConnected ? "warning" : "offline"}`} />
-              <span style={{ fontSize: 12, fontWeight: 600, color: ocrAuthenticated ? "var(--green)" : wsConnected ? "var(--yellow, #f59e0b)" : "var(--text-muted)" }}>
-                {ocrAuthenticated ? "Authenticated" : wsConnected ? "Authenticating..." : "Not Authenticated"}
-              </span>
-            </div>
+            {/* Last vMix action */}
+            {lastVmixAction && (
+              <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                <Layers size={11} style={{ color: "var(--accent)", flexShrink: 0 }} />
+                <span style={{ fontSize: 11, color: "var(--text-muted)", fontFamily: '"Cascadia Code", monospace' }}>
+                  {lastVmixAction.cleared
+                    ? `Layer ${lastVmixAction.layer} cleared`
+                    : `${lastVmixAction.player} → ${lastVmixAction.camera} (L${lastVmixAction.layer})`}
+                </span>
+              </div>
+            )}
           </div>
           <p style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5, marginTop: 8 }}>{backendStatus}</p>
         </div>

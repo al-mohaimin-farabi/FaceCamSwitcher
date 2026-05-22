@@ -1,18 +1,15 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { listen } from "@tauri-apps/api/event";
 import { useSelector, useDispatch } from "react-redux";
 import { type RootState } from "../store/store";
 import {
   setConfig,
   updateConfigField,
-  setFetchedPlayerCount,
-  setWsConnected,
+  setVmixTestResult,
   type AppConfig,
 } from "../store/appSlice";
 import {
   Sliders,
-  Globe,
   Save,
   Info,
   RefreshCw,
@@ -21,73 +18,25 @@ import {
   AlertCircle,
   Camera,
   Cpu,
-  Key,
   Wifi,
   WifiOff,
-  Users,
-  Download,
-  Hash,
+  Plus,
+  X,
+  Zap,
 } from "lucide-react";
 
 export default function Settings() {
   const dispatch = useDispatch();
-  const { config, fetchedPlayerCount, wsConnected } = useSelector(
-    (state: RootState) => state.app,
-  );
+  const { config, vmixTestResult } = useSelector((state: RootState) => state.app);
   const [isLoadingProps, setIsLoadingProps] = useState(false);
   const [isSaving, setIsSaving] = useState(false);
-  const [isFetchingPlayers, setIsFetchingPlayers] = useState(false);
-  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
-  const [fetchError, setFetchError] = useState<string | null>(null);
-  const [message, setMessage] = useState<{
-    text: string;
-    type: "success" | "error";
-  } | null>(null);
+  const [isTestingVmix, setIsTestingVmix] = useState(false);
+  const [newSource, setNewSource] = useState("");
+  const [message, setMessage] = useState<{ text: string; type: "success" | "error" } | null>(null);
 
   useEffect(() => {
-    if (!config) {
-      loadConfig();
-    }
+    if (!config) loadConfig();
   }, []);
-
-  // Listen for WebSocket status events from the Rust backend
-  useEffect(() => {
-    let unlisten: (() => void) | undefined;
-    listen<{ connected: boolean }>("ws_status", (event) => {
-      dispatch(setWsConnected(event.payload.connected));
-    }).then((fn) => {
-      unlisten = fn;
-    });
-    return () => {
-      unlisten?.();
-    };
-  }, [dispatch]);
-
-  // Ping server health endpoint when API URL changes or sync is toggled.
-  // Uses invoke() (Rust reqwest) instead of fetch() to avoid CORS issues.
-  useEffect(() => {
-    if (!config?.server.enabled || !config.server.api_url) {
-      setServerOnline(null);
-      return;
-    }
-    let cancelled = false;
-    const checkHealth = async () => {
-      try {
-        const result = await invoke<{ success: boolean; message: string }>(
-          "check_server_health",
-        );
-        if (!cancelled) setServerOnline(result.success);
-      } catch {
-        if (!cancelled) setServerOnline(false);
-      }
-    };
-    checkHealth();
-    const interval = setInterval(checkHealth, 15000);
-    return () => {
-      cancelled = true;
-      clearInterval(interval);
-    };
-  }, [config?.server.enabled, config?.server.api_url]);
 
   const loadConfig = async () => {
     setIsLoadingProps(true);
@@ -111,7 +60,7 @@ export default function Settings() {
     setIsSaving(true);
     try {
       await invoke("save_config", { config });
-      showMessage("Configuration synchronized successfully", "success");
+      showMessage("Configuration saved successfully", "success");
     } catch (e) {
       showMessage(`Save Error: ${e}`, "error");
     } finally {
@@ -123,180 +72,87 @@ export default function Settings() {
     dispatch(updateConfigField({ path, value }));
   };
 
-  // Auto-save helper — accepts multiple field updates and writes them all
-  // in a single disk write. source_mode and source_id are read from disk at
-  // start_ocr time so they must be persisted immediately, not just in Redux.
-  const saveConfigFields = async (fields: Record<string, any>) => {
+  const handleTestVmix = async () => {
     if (!config) return;
-    const newConfig = JSON.parse(JSON.stringify(config));
-    for (const [path, value] of Object.entries(fields)) {
-      dispatch(updateConfigField({ path, value }));
-      const keys = path.split(".");
-      let obj: any = newConfig;
-      for (let i = 0; i < keys.length - 1; i++) obj = obj[keys[i]];
-      obj[keys[keys.length - 1]] = value;
-    }
+    // Save first so test uses current IP/port
+    try { await invoke("save_config", { config }); } catch { /* ignore */ }
+    setIsTestingVmix(true);
     try {
-      await invoke("save_config", { config: newConfig });
+      const result = await invoke<{ success: boolean; message: string }>("test_vmix_connection");
+      dispatch(setVmixTestResult({ ok: result.success, message: result.message }));
     } catch (e) {
-      showMessage(`Auto-save failed: ${e}`, "error");
+      dispatch(setVmixTestResult({ ok: false, message: String(e) }));
+    } finally {
+      setIsTestingVmix(false);
     }
   };
 
-  const handleFetchPlayers = async () => {
-    setIsFetchingPlayers(true);
-    setFetchError(null);
-    try {
-      const players = await invoke<{ id: string; ign: string }[]>(
-        "fetch_players_from_server",
-      );
-      dispatch(setFetchedPlayerCount(players.length));
-      showMessage(`Loaded ${players.length} players from server`, "success");
-    } catch (e) {
-      const raw = String(e);
-      let friendly: string;
-      if (raw.includes("401")) {
-        friendly = "Invalid secret key — check your OCR Secret Key";
-      } else if (raw.includes("404")) {
-        friendly = "Tournament not found — check your Tournament ID";
-      } else if (raw.includes("403")) {
-        friendly =
-          "Access denied — secret key not authorized for this tournament";
-      } else if (
-        raw.includes("Request failed") ||
-        raw.includes("error sending request")
-      ) {
-        friendly =
-          "Cannot reach server — check API URL and make sure server is running";
-      } else if (raw.includes("Failed to parse")) {
-        friendly = "Server returned unexpected data — API version mismatch?";
-      } else {
-        friendly = raw;
-      }
-      setFetchError(friendly);
-    } finally {
-      setIsFetchingPlayers(false);
-    }
+  const handleAddSource = () => {
+    const trimmed = newSource.trim();
+    if (!trimmed || !config) return;
+    const sources = config.vmix.target_sources ?? [];
+    if (sources.includes(trimmed)) return;
+    updateConfig("vmix.target_sources", [...sources, trimmed]);
+    setNewSource("");
+  };
+
+  const handleRemoveSource = (source: string) => {
+    if (!config) return;
+    updateConfig("vmix.target_sources", config.vmix.target_sources.filter(s => s !== source));
   };
 
   if (isLoadingProps || !config) {
     return (
-      <div
-        style={{
-          display: "flex",
-          flexDirection: "column",
-          alignItems: "center",
-          justifyContent: "center",
-          height: "100%",
-          gap: 20,
-        }}>
-        <RefreshCw
-          size={32}
-          className="animate-spin"
-          style={{ color: "var(--accent)" }}
-        />
-        <p
-          style={{ color: "var(--text-muted)", fontSize: 14, fontWeight: 500 }}>
-          Architecting configuration...
-        </p>
+      <div style={{ display: "flex", flexDirection: "column", alignItems: "center", justifyContent: "center", height: "100%", gap: 20 }}>
+        <RefreshCw size={32} className="animate-spin" style={{ color: "var(--accent)" }} />
+        <p style={{ color: "var(--text-muted)", fontSize: 14, fontWeight: 500 }}>Loading configuration...</p>
       </div>
     );
   }
 
   return (
-    <div
-      style={{
-        padding: 24,
-        height: "100%",
-        overflow: "auto",
-        display: "flex",
-        flexDirection: "column",
-        gap: 24,
-      }}>
+    <div style={{ padding: 24, height: "100%", overflow: "auto", display: "flex", flexDirection: "column", gap: 24 }}>
+
       {/* ── Top Bar ─────────────────────── */}
-      <div
-        style={{
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
         <div>
-          <h2
-            style={{
-              fontSize: 24,
-              fontWeight: 800,
-              color: "var(--text-bright)",
-              letterSpacing: "-0.02em",
-            }}>
+          <h2 style={{ fontSize: 24, fontWeight: 800, color: "var(--text-bright)", letterSpacing: "-0.02em" }}>
             Application Settings
           </h2>
           <p style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4 }}>
-            Tweak OCR engine parameters and server communication protocols
+            Configure OCR engine and vMix Web Controller integration
           </p>
         </div>
         <div style={{ display: "flex", gap: 12 }}>
           {message && (
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 8,
-                padding: "0 16px",
-                borderRadius: "10px",
-                background:
-                  message.type === "success"
-                    ? "rgba(34, 197, 94, 0.1)"
-                    : "rgba(239, 68, 68, 0.1)",
-                border: `1px solid ${message.type === "success" ? "rgba(34, 197, 94, 0.2)" : "rgba(239, 68, 68, 0.2)"}`,
-                color:
-                  message.type === "success" ? "var(--green)" : "var(--red)",
-                fontSize: 12,
-                fontWeight: 600,
-              }}>
-              {message.type === "success" ? (
-                <CheckCircle2 size={14} />
-              ) : (
-                <AlertCircle size={14} />
-              )}
+            <div style={{
+              display: "flex", alignItems: "center", gap: 8, padding: "0 16px", borderRadius: "10px",
+              background: message.type === "success" ? "rgba(34, 197, 94, 0.1)" : "rgba(239, 68, 68, 0.1)",
+              border: `1px solid ${message.type === "success" ? "rgba(34, 197, 94, 0.2)" : "rgba(239, 68, 68, 0.2)"}`,
+              color: message.type === "success" ? "var(--green)" : "var(--red)", fontSize: 12, fontWeight: 600,
+            }}>
+              {message.type === "success" ? <CheckCircle2 size={14} /> : <AlertCircle size={14} />}
               {message.text}
             </div>
           )}
-          <button
-            className="btn btn-primary"
-            onClick={handleSave}
-            disabled={isSaving}
+          <button className="btn btn-primary" onClick={handleSave} disabled={isSaving}
             style={{ minWidth: 140, height: 40, borderRadius: "10px" }}>
-            {isSaving ? (
-              <RefreshCw size={16} className="animate-spin" />
-            ) : (
-              <>
-                <Save size={16} /> Save Changes
-              </>
-            )}
+            {isSaving ? <RefreshCw size={16} className="animate-spin" /> : <><Save size={16} /> Save Changes</>}
           </button>
         </div>
       </div>
 
       <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 24 }}>
-        {/* ── OCR Parameters ────────────── */}
-        <div
-          className="glass-card"
-          style={{
-            padding: 24,
-            display: "flex",
-            flexDirection: "column",
-            gap: 20,
-          }}>
+
+        {/* ── OCR Parameters ─────────────── */}
+        <div className="glass-card" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
           <div className="section-header" style={{ marginBottom: 0 }}>
             <Cpu size={16} className="icon" /> OCR Intelligence
           </div>
-
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div className="input-group">
               <label>Engine Language</label>
-              <select
-                className="input"
-                value={config.ocr.language}
+              <select className="input" value={config.ocr.language}
                 onChange={(e) => updateConfig("ocr.language", e.target.value)}>
                 <option value="en">English (default)</option>
                 <option value="ch">Chinese</option>
@@ -304,633 +160,210 @@ export default function Settings() {
                 <option value="korean">Korean</option>
               </select>
             </div>
-
             <div className="input-group">
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: 6,
-                }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                 <label>Confidence Threshold</label>
-                <span
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: "var(--accent)",
-                  }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--accent)" }}>
                   {(config.ocr.confidence_threshold * 100).toFixed(0)}%
                 </span>
               </div>
-              <input
-                type="range"
-                min="0.1"
-                max="1.0"
-                step="0.05"
+              <input type="range" min="0.1" max="1.0" step="0.05"
                 value={config.ocr.confidence_threshold}
-                onChange={(e) =>
-                  updateConfig(
-                    "ocr.confidence_threshold",
-                    parseFloat(e.target.value),
-                  )
-                }
+                onChange={(e) => updateConfig("ocr.confidence_threshold", parseFloat(e.target.value))}
                 style={{ width: "100%", accentColor: "var(--accent)" }}
               />
             </div>
-
             <div className="input-group">
-              <div
-                style={{
-                  display: "flex",
-                  justifyContent: "space-between",
-                  marginBottom: 6,
-                }}>
+              <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
                 <label>Fuzzy Match Sensitivity</label>
-                <span
-                  style={{
-                    fontSize: 11,
-                    fontWeight: 700,
-                    color: "var(--cyan)",
-                  }}>
+                <span style={{ fontSize: 11, fontWeight: 700, color: "var(--cyan)" }}>
                   {config.ocr.fuzzy_match_threshold}%
                 </span>
               </div>
-              <input
-                type="range"
-                min="30"
-                max="100"
-                step="5"
+              <input type="range" min="30" max="100" step="5"
                 value={config.ocr.fuzzy_match_threshold}
-                onChange={(e) =>
-                  updateConfig(
-                    "ocr.fuzzy_match_threshold",
-                    parseInt(e.target.value),
-                  )
-                }
+                onChange={(e) => updateConfig("ocr.fuzzy_match_threshold", parseInt(e.target.value))}
                 style={{ width: "100%", accentColor: "var(--cyan)" }}
               />
             </div>
-
-            <div
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid var(--border)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}>
+            <div style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
               <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
                 <Sliders size={14} style={{ color: "var(--text-muted)" }} />
-                <span
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 500,
-                    color: "var(--text-secondary)",
-                  }}>
-                  Hardware Acceleration
-                </span>
+                <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-secondary)" }}>Hardware Acceleration</span>
               </div>
-              <div
-                className={`toggle ${config.ocr.use_gpu ? "active" : ""}`}
-                onClick={() => updateConfig("ocr.use_gpu", !config.ocr.use_gpu)}
-                style={{
-                  width: 36,
-                  height: 20,
-                  borderRadius: 10,
-                  background: config.ocr.use_gpu
-                    ? "var(--green)"
-                    : "rgba(255,255,255,0.1)",
-                  position: "relative",
-                  cursor: "pointer",
-                  // transition: "all 0.3s ease",
-                }}>
-                <div
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    background: "white",
-                    position: "absolute",
-                    top: 3,
-                    left: config.ocr.use_gpu ? 19 : 3,
-                    // transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-                  }}
-                />
+              <div onClick={() => updateConfig("ocr.use_gpu", !config.ocr.use_gpu)}
+                style={{ width: 36, height: 20, borderRadius: 10, background: config.ocr.use_gpu ? "var(--green)" : "rgba(255,255,255,0.1)", position: "relative", cursor: "pointer" }}>
+                <div style={{ width: 14, height: 14, borderRadius: "50%", background: "white", position: "absolute", top: 3, left: config.ocr.use_gpu ? 19 : 3 }} />
               </div>
             </div>
           </div>
         </div>
 
-        {/* ── Network Configuration ─────────── */}
-        <div
-          className="glass-card"
-          style={{
-            padding: 24,
-            display: "flex",
-            flexDirection: "column",
-            gap: 20,
-          }}>
-          {/* Header + WS status badge */}
-          <div
-            style={{
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "space-between",
-            }}>
+        {/* ── vMix Controller ─────────────── */}
+        <div className="glass-card" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
+          <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between" }}>
             <div className="section-header" style={{ marginBottom: 0 }}>
-              <Globe size={16} className="icon" /> Network Sync
+              <Zap size={16} className="icon" /> vMix Controller
             </div>
-            <div
-              style={{
-                display: "flex",
-                alignItems: "center",
-                gap: 6,
-                padding: "4px 10px",
-                borderRadius: 8,
-                fontSize: 11,
-                fontWeight: 700,
-                background: wsConnected
-                  ? "rgba(34,197,94,0.1)"
-                  : "rgba(255,255,255,0.04)",
-                border: `1px solid ${wsConnected ? "rgba(34,197,94,0.3)" : "var(--border)"}`,
-                color: wsConnected ? "var(--green)" : "var(--text-muted)",
+            {vmixTestResult !== null && (
+              <div style={{
+                display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 8, fontSize: 11, fontWeight: 700,
+                background: vmixTestResult.ok ? "rgba(34,197,94,0.1)" : "rgba(239,68,68,0.08)",
+                border: `1px solid ${vmixTestResult.ok ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.2)"}`,
+                color: vmixTestResult.ok ? "var(--green)" : "#ef4444",
               }}>
-              {wsConnected ? <Wifi size={12} /> : <WifiOff size={12} />}
-              {wsConnected ? "WS Connected" : "WS Offline"}
-            </div>
+                {vmixTestResult.ok ? <Wifi size={12} /> : <WifiOff size={12} />}
+                {vmixTestResult.ok ? "Connected" : "Unreachable"}
+              </div>
+            )}
           </div>
 
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
-            {/* Enable/disable toggle */}
-            <div
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                background: config.server.enabled
-                  ? "rgba(34,197,94,0.06)"
-                  : "rgba(255,255,255,0.03)",
-                border: `1px solid ${config.server.enabled ? "rgba(34,197,94,0.25)" : "var(--border)"}`,
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}>
-              <div>
-                <span
-                  style={{
-                    fontSize: 13,
-                    fontWeight: 600,
-                    color: config.server.enabled
-                      ? "var(--green)"
-                      : "var(--text-secondary)",
-                  }}>
-                  OCR Bridge Enabled
-                </span>
-                <p
-                  style={{
-                    fontSize: 11,
-                    color: "var(--text-muted)",
-                    marginTop: 2,
-                  }}>
-                  {config.server.enabled
-                    ? "Connects to server via Socket.io on OCR start"
-                    : "Disabled — OCR runs locally only"}
-                </p>
+            {/* IP + Port */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr auto", gap: 10 }}>
+              <div className="input-group" style={{ marginBottom: 0 }}>
+                <label>vMix IP Address</label>
+                <input className="input" type="text" placeholder="192.168.1.100"
+                  value={config.vmix?.ip ?? ""}
+                  onChange={(e) => updateConfig("vmix.ip", e.target.value)}
+                />
               </div>
-              <div
-                onClick={() =>
-                  updateConfig("server.enabled", !config.server.enabled)
-                }
-                style={{
-                  width: 36,
-                  height: 20,
-                  borderRadius: 10,
-                  flexShrink: 0,
-                  background: config.server.enabled
-                    ? "var(--green)"
-                    : "rgba(255,255,255,0.1)",
-                  position: "relative",
-                  cursor: "pointer",
-                }}>
-                <div
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    background: "white",
-                    position: "absolute",
-                    top: 3,
-                    left: config.server.enabled ? 19 : 3,
-                  }}
+              <div className="input-group" style={{ marginBottom: 0, width: 90 }}>
+                <label>Port</label>
+                <input className="input" type="number" placeholder="8088"
+                  value={config.vmix?.port ?? 8088}
+                  onChange={(e) => updateConfig("vmix.port", parseInt(e.target.value) || 8088)}
                 />
               </div>
             </div>
 
-            <div
-              style={{
-                display: "flex",
-                flexDirection: "column",
-                gap: 16,
-                opacity: config.server.enabled ? 1 : 0.45,
-                pointerEvents: config.server.enabled ? "auto" : "none",
-              }}>
-              {/* API Base URL */}
-              <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Globe size={12} style={{ color: "var(--text-muted)" }} />
-                  API Base URL
+            {/* Layer */}
+            <div className="input-group">
+              <label>Target Layer Number</label>
+              <input className="input" type="number" min="1" max="10"
+                value={config.vmix?.layer ?? 7}
+                onChange={(e) => updateConfig("vmix.layer", parseInt(e.target.value) || 7)}
+              />
+            </div>
+
+            {/* Debounce + Clear Timeout */}
+            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
+              <div className="input-group" style={{ marginBottom: 0 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <Clock size={11} style={{ color: "var(--text-muted)" }} /> Debounce (ms)
                 </label>
-                <input
-                  className="input"
-                  type="text"
-                  value={config.server.api_url}
-                  onChange={(e) =>
-                    updateConfig("server.api_url", e.target.value)
-                  }
-                  placeholder={
-                    import.meta.env.VITE_API_URL || "https://api.example.com"
-                  }
+                <input className="input" type="number" min="200" step="100"
+                  value={config.vmix?.debounce_ms ?? 1500}
+                  onChange={(e) => updateConfig("vmix.debounce_ms", parseInt(e.target.value) || 1500)}
                 />
               </div>
-
-              {/* Socket.io Server URL */}
-              <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Wifi size={12} style={{ color: "var(--text-muted)" }} />
-                  Socket.io URL
+              <div className="input-group" style={{ marginBottom: 0 }}>
+                <label style={{ display: "flex", alignItems: "center", gap: 5 }}>
+                  <Clock size={11} style={{ color: "var(--text-muted)" }} /> Clear Timeout (ms)
                 </label>
-                <input
-                  className="input"
-                  type="text"
-                  value={config.server.ws_url}
-                  onChange={(e) =>
-                    updateConfig("server.ws_url", e.target.value)
-                  }
-                  placeholder={
-                    import.meta.env.VITE_WS_URL || "https://api.example.com"
-                  }
+                <input className="input" type="number" min="1000" step="500"
+                  value={config.vmix?.clear_timeout_ms ?? 5000}
+                  onChange={(e) => updateConfig("vmix.clear_timeout_ms", parseInt(e.target.value) || 5000)}
                 />
               </div>
+            </div>
 
-              {/* Tournament ID */}
-              <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Hash size={12} style={{ color: "var(--text-muted)" }} />
-                  Tournament ID
-                </label>
-                <input
-                  className="input"
-                  type="text"
-                  value={config.server.tournament_id}
-                  onChange={(e) =>
-                    updateConfig("server.tournament_id", e.target.value)
-                  }
-                  placeholder="e.g. clx1abc23def456"
-                />
-              </div>
-
-              {/* Secret Key */}
-              <div className="input-group">
-                <label
-                  style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                  <Key size={12} style={{ color: "var(--text-muted)" }} />
-                  Secret Key
-                </label>
-                <input
-                  className="input"
-                  type="password"
-                  value={config.server.secret_key}
-                  onChange={(e) =>
-                    updateConfig("server.secret_key", e.target.value)
-                  }
-                  placeholder="64-character OCR secret"
-                />
-              </div>
-
-              {/* Source Mode toggle */}
-              <div
-                style={{
-                  padding: "12px 14px",
-                  borderRadius: 12,
-                  background: config.server.source_mode
-                    ? "rgba(168,85,247,0.06)"
-                    : "rgba(255,255,255,0.03)",
-                  border: `1px solid ${config.server.source_mode ? "rgba(168,85,247,0.3)" : "var(--border)"}`,
-                  display: "flex",
-                  alignItems: "center",
-                  justifyContent: "space-between",
-                }}>
-                <div>
-                  <span
-                    style={{
-                      fontSize: 13,
-                      fontWeight: 600,
-                      color: config.server.source_mode
-                        ? "#c084fc"
-                        : "var(--text-secondary)",
+            {/* Target Sources */}
+            <div>
+              <label style={{ fontSize: 10, fontWeight: 600, color: "var(--text-muted)", textTransform: "uppercase", letterSpacing: "0.06em", display: "block", marginBottom: 8 }}>
+                Target Sources
+              </label>
+              <div style={{ display: "flex", flexWrap: "wrap", gap: 6, marginBottom: 8, minHeight: 32 }}>
+                {(config.vmix?.target_sources ?? []).length === 0 ? (
+                  <span style={{ fontSize: 11, color: "var(--text-muted)", alignSelf: "center" }}>No sources — add the vMix input names below</span>
+                ) : (
+                  (config.vmix?.target_sources ?? []).map((src) => (
+                    <div key={src} style={{
+                      display: "flex", alignItems: "center", gap: 6, padding: "4px 10px", borderRadius: 8,
+                      background: "rgba(96,165,250,0.12)", border: "1px solid rgba(96,165,250,0.25)",
+                      fontSize: 12, fontWeight: 600, color: "var(--accent)",
                     }}>
-                    Source Mode
-                  </span>
-                  <p
-                    style={{
-                      fontSize: 11,
-                      color: "var(--text-muted)",
-                      marginTop: 2,
-                    }}>
-                    {config.server.source_mode
-                      ? "Routes OCR to an isolated source slot channel"
-                      : "Global mode — routes OCR to the tournament room"}
-                  </p>
-                </div>
-                <div
-                  onClick={() => {
-                    const newMode = !config.server.source_mode;
-                    // When enabling source mode with an empty source_id, default to
-                    // "01" in the same write — prevents the silent global-mode fallback
-                    // in Rust where source_mode=true + source_id="" → global mode.
-                    const fields: Record<string, any> = { "server.source_mode": newMode };
-                    if (newMode && !config.server.source_id) fields["server.source_id"] = "01";
-                    saveConfigFields(fields);
-                  }}
-                  style={{
-                    width: 36,
-                    height: 20,
-                    borderRadius: 10,
-                    flexShrink: 0,
-                    background: config.server.source_mode
-                      ? "#a855f7"
-                      : "rgba(255,255,255,0.1)",
-                    position: "relative",
-                    cursor: "pointer",
-                  }}>
-                  <div
-                    style={{
-                      width: 14,
-                      height: 14,
-                      borderRadius: "50%",
-                      background: "white",
-                      position: "absolute",
-                      top: 3,
-                      left: config.server.source_mode ? 19 : 3,
-                    }}
-                  />
-                </div>
-              </div>
-
-              {/* Source ID selector — visible only in source mode */}
-              {config.server.source_mode && (
-                <div className="input-group">
-                  <label
-                    style={{ display: "flex", alignItems: "center", gap: 6 }}>
-                    <Hash size={12} style={{ color: "#c084fc" }} />
-                    Source Slot
-                  </label>
-                  <select
-                    className="input"
-                    value={config.server.source_id || "01"}
-                    onChange={(e) =>
-                      saveConfigFields({ "server.source_id": e.target.value })
-                    }>
-                    {["01", "02", "03"].map((id) => (
-                      <option key={id} value={id}>
-                        Source {id}
-                      </option>
-                    ))}
-                  </select>
-                </div>
-              )}
-
-              {/* Server status badge */}
-              {serverOnline !== null && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "center",
-                    gap: 6,
-                    padding: "6px 12px",
-                    borderRadius: 8,
-                    background: serverOnline
-                      ? "rgba(34,197,94,0.08)"
-                      : "rgba(239,68,68,0.08)",
-                    border: `1px solid ${serverOnline ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.25)"}`,
-                    fontSize: 11,
-                    fontWeight: 600,
-                    color: serverOnline ? "var(--green)" : "#ef4444",
-                  }}>
-                  <div
-                    style={{
-                      width: 7,
-                      height: 7,
-                      borderRadius: "50%",
-                      background: serverOnline ? "#22c55e" : "#ef4444",
-                    }}
-                  />
-                  Tournament Server {serverOnline ? "Online" : "Offline"}
-                </div>
-              )}
-
-              {/* Fetch Players button + count badge */}
-              <div style={{ display: "flex", alignItems: "center", gap: 12 }}>
-                <button
-                  className="btn btn-primary"
-                  onClick={handleFetchPlayers}
-                  disabled={
-                    isFetchingPlayers ||
-                    !config.server.tournament_id ||
-                    !config.server.secret_key ||
-                    !config.server.api_url
-                  }
-                  style={{ height: 36, borderRadius: 8, fontSize: 12 }}>
-                  {isFetchingPlayers ? (
-                    <RefreshCw size={13} className="animate-spin" />
-                  ) : (
-                    <Download size={13} />
-                  )}
-                  Fetch Players
-                </button>
-                {fetchedPlayerCount > 0 && (
-                  <div
-                    style={{
-                      display: "flex",
-                      alignItems: "center",
-                      gap: 5,
-                      padding: "4px 10px",
-                      borderRadius: 8,
-                      background: "rgba(59,130,246,0.08)",
-                      border: "1px solid rgba(59,130,246,0.2)",
-                      color: "var(--accent)",
-                      fontSize: 11,
-                      fontWeight: 700,
-                    }}>
-                    <Users size={12} />
-                    {fetchedPlayerCount} players loaded
-                  </div>
+                      {src}
+                      <button onClick={() => handleRemoveSource(src)}
+                        style={{ background: "none", border: "none", cursor: "pointer", color: "inherit", padding: 0, display: "flex", alignItems: "center", opacity: 0.7 }}>
+                        <X size={12} />
+                      </button>
+                    </div>
+                  ))
                 )}
               </div>
-
-              {/* API error message */}
-              {fetchError && (
-                <div
-                  style={{
-                    display: "flex",
-                    alignItems: "flex-start",
-                    gap: 8,
-                    padding: "8px 12px",
-                    borderRadius: 8,
-                    background: "rgba(239,68,68,0.08)",
-                    border: "1px solid rgba(239,68,68,0.2)",
-                    color: "#ef4444",
-                    fontSize: 11,
-                    fontWeight: 500,
-                    lineHeight: 1.4,
-                  }}>
-                  <AlertCircle
-                    size={14}
-                    style={{ flexShrink: 0, marginTop: 1 }}
-                  />
-                  {fetchError}
-                </div>
-              )}
+              <div style={{ display: "flex", gap: 8 }}>
+                <input className="input" type="text" placeholder='e.g. "Gameplay" or "OB 1"'
+                  value={newSource}
+                  onChange={(e) => setNewSource(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleAddSource(); }}
+                  style={{ flex: 1, fontSize: 12 }}
+                />
+                <button className="btn btn-accent" onClick={handleAddSource}
+                  style={{ height: 36, padding: "0 12px", borderRadius: 8, flexShrink: 0, display: "flex", alignItems: "center", gap: 6, fontSize: 12 }}>
+                  <Plus size={13} /> Add
+                </button>
+              </div>
             </div>
+
+            {/* Test Connection */}
+            <button className="btn btn-primary" onClick={handleTestVmix} disabled={isTestingVmix}
+              style={{ height: 36, borderRadius: 8, fontSize: 12, width: "100%" }}>
+              {isTestingVmix ? <RefreshCw size={13} className="animate-spin" /> : <Wifi size={13} />}
+              Test vMix Connection
+            </button>
+
+            {vmixTestResult && (
+              <div style={{
+                display: "flex", alignItems: "flex-start", gap: 8, padding: "8px 12px", borderRadius: 8,
+                background: vmixTestResult.ok ? "rgba(34,197,94,0.08)" : "rgba(239,68,68,0.08)",
+                border: `1px solid ${vmixTestResult.ok ? "rgba(34,197,94,0.25)" : "rgba(239,68,68,0.2)"}`,
+                fontSize: 11, fontWeight: 500, color: vmixTestResult.ok ? "var(--green)" : "#ef4444", lineHeight: 1.4,
+              }}>
+                {vmixTestResult.ok ? <CheckCircle2 size={14} style={{ flexShrink: 0, marginTop: 1 }} /> : <AlertCircle size={14} style={{ flexShrink: 0, marginTop: 1 }} />}
+                {vmixTestResult.message}
+              </div>
+            )}
           </div>
         </div>
 
-        {/* ── Capture Lifecycle ────────── */}
-        <div
-          className="glass-card"
-          style={{
-            padding: 24,
-            display: "flex",
-            flexDirection: "column",
-            gap: 20,
-          }}>
+        {/* ── Data Capture ─────────────────── */}
+        <div className="glass-card" style={{ padding: 24, display: "flex", flexDirection: "column", gap: 20 }}>
           <div className="section-header" style={{ marginBottom: 0 }}>
             <Camera size={16} className="icon" /> Data Capture
           </div>
-
           <div style={{ display: "flex", flexDirection: "column", gap: 16 }}>
             <div className="input-group">
               <label>Scan Interval (seconds)</label>
               <div style={{ position: "relative" }}>
-                <Clock
-                  size={14}
-                  style={{
-                    position: "absolute",
-                    left: 12,
-                    top: "50%",
-                    transform: "translateY(-50%)",
-                    color: "var(--text-muted)",
-                  }}
-                />
-                <input
-                  className="input"
-                  type="number"
-                  step="0.1"
-                  min="0.5"
+                <Clock size={14} style={{ position: "absolute", left: 12, top: "50%", transform: "translateY(-50%)", color: "var(--text-muted)" }} />
+                <input className="input" type="number" step="0.1" min="0.1"
                   value={config.capture.interval_seconds}
-                  onChange={(e) =>
-                    updateConfig(
-                      "capture.interval_seconds",
-                      parseFloat(e.target.value) || 2,
-                    )
-                  }
+                  onChange={(e) => updateConfig("capture.interval_seconds", parseFloat(e.target.value) || 0.1)}
                   style={{ paddingLeft: 34 }}
                 />
               </div>
             </div>
-
-            <div
-              style={{
-                padding: "12px 14px",
-                borderRadius: 12,
-                background: "rgba(255,255,255,0.03)",
-                border: "1px solid var(--border)",
-                display: "flex",
-                alignItems: "center",
-                justifyContent: "space-between",
-              }}>
-              <span
-                style={{
-                  fontSize: 13,
-                  fontWeight: 500,
-                  color: "var(--text-secondary)",
-                }}>
-                Diagnostic Screenshots
-              </span>
-              <div
-                className={`toggle ${config.capture.save_debug_screenshots ? "active" : ""}`}
-                onClick={() =>
-                  updateConfig(
-                    "capture.save_debug_screenshots",
-                    !config.capture.save_debug_screenshots,
-                  )
-                }
-                style={{
-                  width: 36,
-                  height: 20,
-                  borderRadius: 10,
-                  background: config.capture.save_debug_screenshots
-                    ? "var(--accent)"
-                    : "rgba(255,255,255,0.1)",
-                  position: "relative",
-                  cursor: "pointer",
-                  // transition: "all 0.3s ease",
-                }}>
-                <div
-                  style={{
-                    width: 14,
-                    height: 14,
-                    borderRadius: "50%",
-                    background: "white",
-                    position: "absolute",
-                    top: 3,
-                    left: config.capture.save_debug_screenshots ? 19 : 3,
-                    // transition: "all 0.3s cubic-bezier(0.4, 0, 0.2, 1)",
-                  }}
-                />
+            <div style={{ padding: "12px 14px", borderRadius: 12, background: "rgba(255,255,255,0.03)", border: "1px solid var(--border)", display: "flex", alignItems: "center", justifyContent: "space-between" }}>
+              <span style={{ fontSize: 13, fontWeight: 500, color: "var(--text-secondary)" }}>Diagnostic Screenshots</span>
+              <div onClick={() => updateConfig("capture.save_debug_screenshots", !config.capture.save_debug_screenshots)}
+                style={{ width: 36, height: 20, borderRadius: 10, background: config.capture.save_debug_screenshots ? "var(--accent)" : "rgba(255,255,255,0.1)", position: "relative", cursor: "pointer" }}>
+                <div style={{ width: 14, height: 14, borderRadius: "50%", background: "white", position: "absolute", top: 3, left: config.capture.save_debug_screenshots ? 19 : 3 }} />
               </div>
             </div>
-
             {config.capture.save_debug_screenshots && (
               <div className="input-group">
                 <label>Storage Pathway</label>
-                <input
-                  className="input"
-                  type="text"
+                <input className="input" type="text"
                   value={config.capture.debug_screenshot_dir}
-                  onChange={(e) =>
-                    updateConfig("capture.debug_screenshot_dir", e.target.value)
-                  }
+                  onChange={(e) => updateConfig("capture.debug_screenshot_dir", e.target.value)}
                 />
               </div>
             )}
-
-            <div
-              style={{
-                marginTop: "auto",
-                padding: 12,
-                borderRadius: 10,
-                background: "rgba(59, 130, 246, 0.04)",
-                border: "1px solid rgba(59, 130, 246, 0.1)",
-                display: "flex",
-                gap: 10,
-              }}>
-              <Info
-                size={16}
-                style={{ color: "var(--accent)", flexShrink: 0 }}
-              />
-              <p
-                style={{
-                  fontSize: 11,
-                  color: "var(--text-muted)",
-                  lineHeight: 1.5,
-                }}>
-                Lowering the scan interval increases CPU usage. For most
-                high-stakes matches, 2.0s is the optimal balance.
+            <div style={{ marginTop: "auto", padding: 12, borderRadius: 10, background: "rgba(59, 130, 246, 0.04)", border: "1px solid rgba(59, 130, 246, 0.1)", display: "flex", gap: 10 }}>
+              <Info size={16} style={{ color: "var(--accent)", flexShrink: 0 }} />
+              <p style={{ fontSize: 11, color: "var(--text-muted)", lineHeight: 1.5 }}>
+                Debounce and clear-timeout are in milliseconds. Debounce prevents vMix spam when OCR text flickers. Clear-timeout sends SetLayer→None after the region goes blank.
               </p>
             </div>
           </div>

@@ -16,6 +16,14 @@ export interface CameraInfo {
   name: string;
 }
 
+export interface VmixConfig {
+  ip: string;
+  port: number;
+  layer: number;
+  target_sources: string[];
+  debounce_ms: number;
+  clear_timeout_ms: number;
+}
 
 export interface AppConfig {
   saved_regions: Record<string, { left: number; top: number; width: number; height: number }>;
@@ -31,16 +39,9 @@ export interface AppConfig {
     };
     camera_index: number;
   };
-  server: {
-    enabled: boolean;
-    url: string;        // legacy field — kept for backward compat
-    api_url: string;    // base URL for GET /api/ocr/tournament/:id
-    ws_url: string;     // WebSocket URL for OCR bridge
-    tournament_id: string;
-    secret_key: string;
-    source_mode: boolean;  // if true, routes events to a source slot channel
-    source_id: string;     // e.g. "01", "02", "03"
-  };
+  vmix: VmixConfig;
+  /** Maps matched player name → vMix camera input name */
+  player_camera_map: Record<string, string>;
   ocr: {
     language: string;
     confidence_threshold: number;
@@ -64,6 +65,13 @@ export interface PreviewData {
   }[];
 }
 
+export interface VmixAction {
+  player: string | null;
+  camera: string | null;
+  layer: number;
+  cleared: boolean;
+}
+
 interface AppState {
   config: AppConfig | null;
   isRunning: boolean;
@@ -78,9 +86,8 @@ interface AppState {
   cameraList: CameraInfo[];
   backendOk: boolean;
   backendStatus: string;
-  fetchedPlayerCount: number;
-  wsConnected: boolean;
-  ocrAuthenticated: boolean;
+  lastVmixAction: VmixAction | null;
+  vmixTestResult: { ok: boolean; message: string } | null;
 }
 
 const initialState: AppState = {
@@ -93,9 +100,8 @@ const initialState: AppState = {
   cameraList: [],
   backendOk: false,
   backendStatus: "Checking...",
-  fetchedPlayerCount: 0,
-  wsConnected: false,
-  ocrAuthenticated: false,
+  lastVmixAction: null,
+  vmixTestResult: null,
 };
 
 export const appSlice = createSlice({
@@ -117,10 +123,8 @@ export const appSlice = createSlice({
     setIsRunning: (state, action: PayloadAction<boolean>) => {
       state.isRunning = action.payload;
       if (action.payload) {
-        // Reset stats on start, but keep last preview until first new frame arrives
         state.stats = { scans: 0, detections: 0, matches: 0 };
       }
-      // Do NOT clear previewData on stop — keep last captured frame visible
     },
     addLog: (state, action: PayloadAction<LogEntry>) => {
       state.logs.push(action.payload);
@@ -153,15 +157,16 @@ export const appSlice = createSlice({
       state.backendOk = action.payload.ok;
       state.backendStatus = action.payload.message;
     },
-    setFetchedPlayerCount: (state, action: PayloadAction<number>) => {
-      state.fetchedPlayerCount = action.payload;
+    setLastVmixAction: (state, action: PayloadAction<VmixAction | null>) => {
+      state.lastVmixAction = action.payload;
     },
-    setWsConnected: (state, action: PayloadAction<boolean>) => {
-      state.wsConnected = action.payload;
-      if (!action.payload) state.ocrAuthenticated = false;
+    setVmixTestResult: (state, action: PayloadAction<{ ok: boolean; message: string } | null>) => {
+      state.vmixTestResult = action.payload;
     },
-    setOcrAuthenticated: (state, action: PayloadAction<boolean>) => {
-      state.ocrAuthenticated = action.payload;
+    setPlayerCameraMap: (state, action: PayloadAction<Record<string, string>>) => {
+      if (state.config) {
+        state.config.player_camera_map = action.payload;
+      }
     },
   },
 });
@@ -179,9 +184,9 @@ export const {
   setWindowList,
   setCameraList,
   setBackendStatus,
-  setFetchedPlayerCount,
-  setWsConnected,
-  setOcrAuthenticated,
+  setLastVmixAction,
+  setVmixTestResult,
+  setPlayerCameraMap,
 } = appSlice.actions;
 
 export default appSlice.reducer;

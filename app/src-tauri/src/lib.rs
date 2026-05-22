@@ -2,10 +2,7 @@ mod capture;
 mod matcher;
 mod ocr;
 
-use futures_util::FutureExt;
 use reqwest::Client as HttpClient;
-use rust_socketio::asynchronous::{Client as SioClient, ClientBuilder};
-use rust_socketio::Payload;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::path::PathBuf;
@@ -13,39 +10,17 @@ use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
 use tokio::time::{interval, Duration};
-use urlencoding::encode as url_encode;
 
 // ── State ────────────────────────────────────────────────────────────
 
-/// A player fetched from the server API (replaces Players Name.txt when server sync is enabled).
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct Player {
-    id: String,
-    ign: String,
-    #[serde(rename = "playerNumber")]
-    player_number: Option<i32>,
-}
-
 struct OcrState {
     running: AtomicBool,
-    /// True while Socket.io is connected and authenticated.
-    sio_connected: AtomicBool,
-    /// Monotonically increasing generation. Each call to start_ocr() increments this.
-    /// Async loops capture their generation at start; if a later start_ocr() bumps it,
-    /// the old loops detect they've been superseded and exit silently without touching
-    /// shared state. Prevents races where a stale loop wipes a fresh loop's state.
+    /// Monotonically increasing generation — each start_ocr() bumps this.
+    /// Stale loops detect the bump and exit without touching shared state.
     loop_generation: AtomicU64,
     matcher: Mutex<matcher::FuzzyMatcher>,
-    /// Players fetched from server API — used for WebSocket player ID lookup.
-    fetched_players: Mutex<Vec<Player>>,
-    /// Socket.io client for the active connection to the server.
-    sio_client: Mutex<Option<SioClient>>,
-    /// Last player ID sent to the server (dedup — only send on change).
-    /// `None` = sentinel (not yet sent), `Some(None)` = sent noMatch, `Some(Some(id))` = sent player.
-    last_sent_player: Mutex<Option<Option<String>>>,
-    /// Consecutive "no match" scan count — prevents flicker by requiring N consecutive
-    /// misses before actually sending noMatch to the server.
-    no_match_streak: Mutex<u32>,
+    /// Last camera input name sent to vMix (dedup — only send on change).
+    last_sent_camera: Mutex<Option<String>>,
 }
 
 /// Holds captured image data for the region selector overlay window.
@@ -53,11 +28,8 @@ struct RegionSelectorState {
     image_b64: Mutex<Option<String>>,
     original_width: Mutex<u32>,
     original_height: Mutex<u32>,
-    /// Which source opened the selector: "window" or "camera"
     source_type: Mutex<String>,
-    /// HWND of the window being selected (for window mode)
     source_hwnd: Mutex<i64>,
-    /// Camera index (for camera mode)
     source_camera: Mutex<u32>,
 }
 
@@ -117,32 +89,42 @@ struct CameraInfo {
 }
 
 #[derive(Serialize, Deserialize, Clone)]
-struct ServerConfig {
+struct VmixConfig {
+    #[serde(default = "default_vmix_ip")]
+    ip: String,
+    #[serde(default = "default_vmix_port")]
+    port: u16,
+    #[serde(default = "default_vmix_layer")]
+    layer: u32,
+    /// vMix input names that are the "target sources" (e.g. "Gameplay", "OB 1").
+    /// SetLayer is fired on every checked source simultaneously.
     #[serde(default)]
-    enabled: bool,
-    /// Legacy field — kept so old config.json files still deserialize without error.
-    #[serde(default)]
-    url: String,
-    /// Base URL of the FaceCam API server (e.g. https://facecamapi.ecube.gg).
-    #[serde(default)]
-    api_url: String,
-    /// WebSocket URL for the OCR bridge (e.g. wss://facecamapi.ecube.gg).
-    #[serde(default)]
-    ws_url: String,
-    /// Tournament ID to load players from.
-    #[serde(default)]
-    tournament_id: String,
-    /// OCR_SECRET_KEY from the server .env — used for API auth and WS auth.
-    #[serde(default)]
-    secret_key: String,
-    /// If true, routes OCR events to an isolated source slot channel instead
-    /// of the global tournament room. Requires source_id to be set.
-    #[serde(default)]
-    source_mode: bool,
-    /// Zero-padded source slot ID, e.g. "01", "02", "03".
-    /// Only used when source_mode is true.
-    #[serde(default)]
-    source_id: String,
+    target_sources: Vec<String>,
+    /// Milliseconds a detection must be stable before vMix is called.
+    #[serde(default = "default_debounce_ms")]
+    debounce_ms: u64,
+    /// Milliseconds of blank/no-match before the layer is cleared (SetLayer → None).
+    #[serde(default = "default_clear_timeout_ms")]
+    clear_timeout_ms: u64,
+}
+
+fn default_vmix_ip() -> String { "192.168.1.100".into() }
+fn default_vmix_port() -> u16 { 8088 }
+fn default_vmix_layer() -> u32 { 7 }
+fn default_debounce_ms() -> u64 { 1500 }
+fn default_clear_timeout_ms() -> u64 { 5000 }
+
+impl Default for VmixConfig {
+    fn default() -> Self {
+        VmixConfig {
+            ip: default_vmix_ip(),
+            port: default_vmix_port(),
+            layer: default_vmix_layer(),
+            target_sources: Vec::new(),
+            debounce_ms: default_debounce_ms(),
+            clear_timeout_ms: default_clear_timeout_ms(),
+        }
+    }
 }
 
 #[derive(Serialize, Deserialize, Clone)]
@@ -163,7 +145,11 @@ struct CaptureConfig {
 #[derive(Serialize, Deserialize, Clone)]
 struct AppConfig {
     input_source: InputSource,
-    server: ServerConfig,
+    #[serde(default)]
+    vmix: VmixConfig,
+    /// Maps matched player name (e.g. "RHK.BLADE") to vMix camera input name (e.g. "Camera 1").
+    #[serde(default)]
+    player_camera_map: std::collections::HashMap<String, String>,
     ocr: OcrConfig,
     capture: CaptureConfig,
     #[serde(default)]
@@ -195,16 +181,15 @@ fn ensure_default_config(dir: &PathBuf) {
     "window_region": { "left": 0, "top": 0, "width": 530, "height": 193 },
     "camera_index": 0
   },
-  "server": {
-    "enabled": false,
-    "url": "",
-    "api_url": "https://facecamapi.ecube.gg",
-    "ws_url": "wss://facecamapi.ecube.gg",
-    "tournament_id": "",
-    "secret_key": "",
-    "source_mode": false,
-    "source_id": "01"
+  "vmix": {
+    "ip": "192.168.1.100",
+    "port": 8088,
+    "layer": 7,
+    "target_sources": [],
+    "debounce_ms": 1500,
+    "clear_timeout_ms": 5000
   },
+  "player_camera_map": {},
   "ocr": {
     "language": "en",
     "confidence_threshold": 0.6,
@@ -261,7 +246,6 @@ fn get_players_path() -> PathBuf {
 }
 
 fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
-    // Helper: check if a directory contains the required model files
     fn has_models(dir: &PathBuf) -> bool {
         dir.join("det.onnx").exists()
             && dir.join("rec.onnx").exists()
@@ -270,7 +254,6 @@ fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
 
     let mut checked: Vec<String> = Vec::new();
 
-    // 1. Tauri resource directory (official bundle path)
     if let Ok(res_dir) = app.path().resource_dir() {
         let models_sub = res_dir.join("models");
         checked.push(format!("resource_dir/models: {}", models_sub.display()));
@@ -285,9 +268,7 @@ fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
         }
     }
 
-    // 2. Next to the executable (NSIS installs put models/ next to .exe)
     if let Ok(exe_path) = std::env::current_exe() {
-        // Canonicalize to resolve symlinks/junctions and \\?\ prefixes
         let exe_path = exe_path.canonicalize().unwrap_or(exe_path);
         if let Some(exe_dir) = exe_path.parent() {
             let candidate = exe_dir.join("models");
@@ -297,7 +278,6 @@ fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
                 return Some(candidate);
             }
 
-            // Dev: target/debug -> src-tauri/models
             let candidate_dev = exe_dir.join("..").join("..").join("models");
             checked.push(format!("dev(../../models): {}", candidate_dev.display()));
             if has_models(&candidate_dev) {
@@ -305,7 +285,6 @@ fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
                 return Some(candidate_dev);
             }
 
-            // Dev: deeper repo root
             let candidate_dev2 = exe_dir
                 .join("..").join("..").join("..").join("..").join("models");
             checked.push(format!("dev(../../../../models): {}", candidate_dev2.display()));
@@ -316,7 +295,6 @@ fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
         }
     }
 
-    // 3. CWD-relative
     if let Ok(cwd) = std::env::current_dir() {
         let candidate = cwd.join("models");
         checked.push(format!("cwd/models: {}", candidate.display()));
@@ -326,7 +304,6 @@ fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
         }
     }
 
-    // 4. AppData
     let appdata_models = get_app_data_dir().join("models");
     checked.push(format!("appdata/models: {}", appdata_models.display()));
     if has_models(&appdata_models) {
@@ -334,16 +311,144 @@ fn find_models_dir(app: &AppHandle) -> Option<PathBuf> {
         return Some(appdata_models);
     }
 
-    // Log all checked paths for debugging
     eprintln!("[WARN] ONNX models not found. Checked paths:");
     for p in &checked {
         eprintln!("  - {}", p);
     }
-
     None
 }
 
-// ── Config Commands ──────────────────────────────────────────────────
+// ── vMix API ─────────────────────────────────────────────────────────
+
+/// Fire SetLayer for every target source in parallel.
+/// `camera_input` = None sends `Value=[layer],None` to clear the layer.
+async fn call_vmix_set_layer(
+    ip: &str,
+    port: u16,
+    layer: u32,
+    target_sources: &[String],
+    camera_input: Option<&str>,
+) -> Vec<Result<(), String>> {
+    if target_sources.is_empty() {
+        return vec![];
+    }
+
+    let value = match camera_input {
+        Some(cam) => format!("{},{}", layer, cam),
+        None => format!("{},None", layer),
+    };
+
+    let client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(3))
+        .build()
+        .unwrap_or_default();
+
+    let mut handles = Vec::new();
+    for source in target_sources {
+        let url = format!(
+            "http://{}:{}/api/?Function=SetLayer&Input={}&Value={}",
+            ip,
+            port,
+            urlencoded(source),
+            urlencoded(&value),
+        );
+        let c = client.clone();
+        handles.push(tokio::spawn(async move {
+            match c.get(&url).send().await {
+                Ok(resp) if resp.status().is_success() => Ok(()),
+                Ok(resp) => Err(format!("vMix returned {}", resp.status())),
+                Err(e) => Err(format!("vMix request failed: {e}")),
+            }
+        }));
+    }
+
+    let mut results = Vec::new();
+    for h in handles {
+        results.push(h.await.unwrap_or_else(|e| Err(format!("Task panicked: {e}"))));
+    }
+    results
+}
+
+fn urlencoded(s: &str) -> String {
+    s.chars()
+        .flat_map(|c| match c {
+            'A'..='Z' | 'a'..='z' | '0'..='9' | '-' | '_' | '.' | '~' => {
+                vec![c]
+            }
+            ' ' => vec!['+'],
+            c => {
+                let mut buf = [0u8; 4];
+                let bytes = c.encode_utf8(&mut buf).as_bytes().to_vec();
+                bytes.iter().flat_map(|b| {
+                    format!("%{:02X}", b).chars().collect::<Vec<_>>()
+                }).collect()
+            }
+        })
+        .collect()
+}
+
+/// Ping the vMix API root to verify connectivity.
+#[tauri::command]
+async fn test_vmix_connection() -> Result<CommandResult, String> {
+    let config = load_config()?;
+    let url = format!("http://{}:{}/api/", config.vmix.ip, config.vmix.port);
+    let client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(CommandResult {
+            success: true,
+            message: format!("vMix reachable at {}:{}", config.vmix.ip, config.vmix.port),
+        }),
+        Ok(resp) => Ok(CommandResult {
+            success: false,
+            message: format!("vMix returned HTTP {}", resp.status()),
+        }),
+        Err(e) => Ok(CommandResult {
+            success: false,
+            message: format!("Cannot reach vMix: {e}"),
+        }),
+    }
+}
+
+/// Manually clear the vMix layer on all target sources (sends Value=[layer],None).
+#[tauri::command]
+async fn send_vmix_layer_clear(
+    app: AppHandle,
+    state: tauri::State<'_, Arc<OcrState>>,
+) -> Result<CommandResult, String> {
+    let config = load_config()?;
+    let results = call_vmix_set_layer(
+        &config.vmix.ip,
+        config.vmix.port,
+        config.vmix.layer,
+        &config.vmix.target_sources,
+        None,
+    ).await;
+
+    // Reset dedup so next detection fires immediately
+    if let Ok(mut last) = state.last_sent_camera.lock() {
+        *last = None;
+    }
+
+    let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+    if errors.is_empty() {
+        let _ = app.emit("log", LogEvent {
+            level: "success".into(),
+            message: format!("[vMix] Layer {} cleared on {} source(s)", config.vmix.layer, config.vmix.target_sources.len()),
+        });
+        Ok(CommandResult { success: true, message: "Layer cleared".into() })
+    } else {
+        Ok(CommandResult {
+            success: false,
+            message: format!("Partial failure: {:?}", errors),
+        })
+    }
+}
+
+// ── Config Commands ───────────────────────────────────────────────────
 
 #[tauri::command]
 fn load_config() -> Result<AppConfig, String> {
@@ -367,7 +472,7 @@ fn save_config(config: AppConfig) -> Result<CommandResult, String> {
     })
 }
 
-// ── Window Enumeration (native via xcap) ────────────────────────────
+// ── Window Enumeration ───────────────────────────────────────────────
 
 #[tauri::command]
 fn list_windows() -> Result<Vec<WindowInfo>, String> {
@@ -383,22 +488,16 @@ fn list_windows() -> Result<Vec<WindowInfo>, String> {
 
 #[tauri::command]
 fn list_cameras() -> Result<Vec<CameraInfo>, String> {
-    // Use DirectShow enumeration for the complete list of devices
-    // (including virtual cameras like OBS, vMix, NDI).
-    // DirectShow indices match the order that nokhwa/MF uses on Windows.
     let ds_devices = enumerate_directshow_video_devices().unwrap_or_default();
-
     if !ds_devices.is_empty() {
         return Ok(ds_devices);
     }
 
-    // Fallback: MF enumeration
     let mf_devices = enumerate_mf_video_devices().unwrap_or_default();
     if !mf_devices.is_empty() {
         return Ok(mf_devices);
     }
 
-    // Last resort: nokhwa
     use nokhwa::utils::CameraIndex;
     let cameras = nokhwa::query(nokhwa::utils::ApiBackend::Auto)
         .map_err(|e| format!("Failed to enumerate cameras: {e}"))?;
@@ -417,8 +516,6 @@ fn list_cameras() -> Result<Vec<CameraInfo>, String> {
         .collect())
 }
 
-/// Enumerate video devices using Media Foundation's MFEnumDeviceSources.
-/// This matches the indices used by capture_camera_frame.
 fn enumerate_mf_video_devices() -> Result<Vec<CameraInfo>, String> {
     use windows::Win32::Media::MediaFoundation::*;
     use windows::Win32::System::Com::*;
@@ -458,10 +555,7 @@ fn enumerate_mf_video_devices() -> Result<Vec<CameraInfo>, String> {
                     ).is_ok() {
                         let name = name_ptr.to_string().unwrap_or_default();
                         if !name.is_empty() {
-                            result.push(CameraInfo {
-                                index: i,
-                                name,
-                            });
+                            result.push(CameraInfo { index: i, name });
                         }
                         CoTaskMemFree(Some(name_ptr.as_ptr() as *const _));
                     }
@@ -475,8 +569,6 @@ fn enumerate_mf_video_devices() -> Result<Vec<CameraInfo>, String> {
     }
 }
 
-/// Enumerate video input devices using DirectShow's ICreateDevEnum COM interface.
-/// This sees all registered video capture devices including virtual cameras.
 fn enumerate_directshow_video_devices() -> Result<Vec<CameraInfo>, String> {
     use windows::Win32::Media::DirectShow::ICreateDevEnum;
     use windows::Win32::Media::MediaFoundation::{
@@ -536,17 +628,13 @@ fn enumerate_directshow_video_devices() -> Result<Vec<CameraInfo>, String> {
                         if let Ok(name) = windows::core::BSTR::try_from(&var) {
                             let name_str = name.to_string();
                             if !name_str.is_empty() {
-                                devices.push(CameraInfo {
-                                    index,
-                                    name: name_str,
-                                });
+                                devices.push(CameraInfo { index, name: name_str });
                                 index += 1;
                             }
                         }
                     }
                 }
             }
-
             moniker_array[0] = None;
         }
 
@@ -555,7 +643,7 @@ fn enumerate_directshow_video_devices() -> Result<Vec<CameraInfo>, String> {
     }
 }
 
-// ── Player Name Commands ─────────────────────────────────────────────
+// ── Player Name Commands ──────────────────────────────────────────────
 
 #[tauri::command]
 fn load_players() -> Result<Vec<String>, String> {
@@ -582,7 +670,6 @@ fn save_players(
     let path = get_players_path();
     let content = players.join("\n");
     fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
-    // Update the live matcher
     if let Ok(mut m) = state.matcher.lock() {
         m.update_players(players.clone());
     }
@@ -618,16 +705,10 @@ fn add_player(
     names.push(trimmed.clone());
     let content = names.join("\n");
     fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
-
-    // Update live matcher
     if let Ok(mut m) = state.matcher.lock() {
         m.update_players(names);
     }
-
-    Ok(CommandResult {
-        success: true,
-        message: format!("Added '{}'", trimmed),
-    })
+    Ok(CommandResult { success: true, message: format!("Added '{}'", trimmed) })
 }
 
 #[tauri::command]
@@ -637,28 +718,17 @@ fn remove_player(
 ) -> Result<CommandResult, String> {
     let path = get_players_path();
     let mut names = load_players().unwrap_or_default();
-
     let before = names.len();
     names.retain(|n| n.to_uppercase() != name.to_uppercase());
-
     if names.len() == before {
-        return Ok(CommandResult {
-            success: false,
-            message: format!("'{}' not found", name),
-        });
+        return Ok(CommandResult { success: false, message: format!("'{}' not found", name) });
     }
-
     let content = names.join("\n");
     fs::write(&path, content).map_err(|e| format!("Failed to write players file: {}", e))?;
-
     if let Ok(mut m) = state.matcher.lock() {
         m.update_players(names);
     }
-
-    Ok(CommandResult {
-        success: true,
-        message: format!("Removed '{}'", name),
-    })
+    Ok(CommandResult { success: true, message: format!("Removed '{}'", name) })
 }
 
 #[tauri::command]
@@ -669,40 +739,27 @@ fn rename_player(
 ) -> Result<CommandResult, String> {
     let path = get_players_path();
     let mut names = load_players().unwrap_or_default();
-
     let trimmed_new = new_name.trim().to_uppercase();
     if trimmed_new.is_empty() {
-        return Ok(CommandResult {
-            success: false,
-            message: "New name cannot be empty".into(),
-        });
+        return Ok(CommandResult { success: false, message: "New name cannot be empty".into() });
     }
-
-    // Find the old name
     let pos = names.iter().position(|n| n.to_uppercase() == old_name.to_uppercase());
     match pos {
-        None => Ok(CommandResult {
-            success: false,
-            message: format!("'{}' not found", old_name),
-        }),
+        None => Ok(CommandResult { success: false, message: format!("'{}' not found", old_name) }),
         Some(idx) => {
-            // Check if new name already exists (and isn't the same entry)
             if names.iter().enumerate().any(|(i, n)| i != idx && n.to_uppercase() == trimmed_new) {
                 return Ok(CommandResult {
                     success: false,
                     message: format!("'{}' already exists", trimmed_new),
                 });
             }
-
             names[idx] = trimmed_new.clone();
             let content = names.join("\n");
             fs::write(&path, content)
                 .map_err(|e| format!("Failed to write players file: {}", e))?;
-
             if let Ok(mut m) = state.matcher.lock() {
                 m.update_players(names);
             }
-
             Ok(CommandResult {
                 success: true,
                 message: format!("Renamed '{}' → '{}'", old_name, trimmed_new),
@@ -711,145 +768,7 @@ fn rename_player(
     }
 }
 
-// ── Server Integration ───────────────────────────────────────────────
-
-#[derive(Deserialize)]
-struct FetchPlayersResponse {
-    players: Vec<Player>,
-}
-
-/// Fetch tournament player list from the server API.
-/// Updates the FuzzyMatcher and stores players for WebSocket ID lookup.
-/// Call this once before starting OCR (via the Settings "Fetch Players" button).
-#[tauri::command]
-async fn fetch_players_from_server(
-    app: AppHandle,
-    state: tauri::State<'_, Arc<OcrState>>,
-) -> Result<Vec<Player>, String> {
-    let config = load_config()?;
-
-    if !config.server.enabled {
-        return Err("Server sync is disabled. Enable it in Settings.".into());
-    }
-    if config.server.api_url.is_empty()
-        || config.server.tournament_id.is_empty()
-        || config.server.secret_key.is_empty()
-    {
-        return Err("API URL, Tournament ID, and Secret Key are all required.".into());
-    }
-
-    let url = format!(
-        "{}/api/ocr/tournament/{}",
-        config.server.api_url.trim_end_matches('/'),
-        config.server.tournament_id
-    );
-
-    let client = HttpClient::new();
-    let resp = client
-        .get(&url)
-        .header(
-            "Authorization",
-            format!("Bearer {}", config.server.secret_key),
-        )
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Server returned {}", resp.status()));
-    }
-
-    let data: FetchPlayersResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    // Store fetched players for WebSocket ID lookups
-    {
-        let mut fp = state.fetched_players.lock().unwrap();
-        *fp = data.players.clone();
-    }
-
-    // Update the live FuzzyMatcher with the new IGN list
-    let igns: Vec<String> = data.players.iter().map(|p| p.ign.clone()).collect();
-    if let Ok(mut m) = state.matcher.lock() {
-        m.update_players(igns.clone());
-    }
-
-    // Write to Players Name.txt so the Players page reflects the server list
-    let players_path = get_players_path();
-    let content = igns.join("\n");
-    fs::write(&players_path, &content)
-        .map_err(|e| format!("Failed to write Players Name.txt: {e}"))?;
-
-    let _ = app.emit(
-        "log",
-        LogEvent {
-            level: "success".into(),
-            message: format!(
-                "Loaded {} players from server (tournament: {})",
-                data.players.len(),
-                config.server.tournament_id
-            ),
-        },
-    );
-
-    Ok(data.players)
-}
-
-/// Fetch players from server API without needing tauri::State.
-/// Used for auto-fetching at OCR start.
-async fn auto_fetch_players(
-    app: &AppHandle,
-    state: &Arc<OcrState>,
-    config: &AppConfig,
-) -> Result<usize, String> {
-    let url = format!(
-        "{}/api/ocr/tournament/{}",
-        config.server.api_url.trim_end_matches('/'),
-        config.server.tournament_id
-    );
-
-    let client = HttpClient::new();
-    let resp = client
-        .get(&url)
-        .header("Authorization", format!("Bearer {}", config.server.secret_key))
-        .send()
-        .await
-        .map_err(|e| format!("Request failed: {e}"))?;
-
-    if !resp.status().is_success() {
-        return Err(format!("Server returned {}", resp.status()));
-    }
-
-    let data: FetchPlayersResponse = resp
-        .json()
-        .await
-        .map_err(|e| format!("Failed to parse response: {e}"))?;
-
-    let count = data.players.len();
-
-    // Store for ID lookups
-    if let Ok(mut fp) = state.fetched_players.lock() {
-        *fp = data.players.clone();
-    }
-
-    // Update fuzzy matcher
-    let igns: Vec<String> = data.players.iter().map(|p| p.ign.clone()).collect();
-    if let Ok(mut m) = state.matcher.lock() {
-        m.update_players(igns.clone());
-    }
-
-    // Write to Players Name.txt
-    let players_path = get_players_path();
-    let content = igns.join("\n");
-    fs::write(&players_path, &content)
-        .map_err(|e| format!("Failed to write Players Name.txt: {e}"))?;
-
-    Ok(count)
-}
-
-// ── OCR Commands (native Rust) ──────────────────────────────────────
+// ── OCR Commands ─────────────────────────────────────────────────────
 
 #[tauri::command]
 async fn start_ocr(
@@ -860,97 +779,11 @@ async fn start_ocr(
         return Err("OCR already running".into());
     }
 
-    let config = match load_config() {
-        Ok(c) => c,
-        Err(e) => {
-            state.running.store(false, Ordering::SeqCst);
-            return Err(format!("Failed to load config: {e}"));
-        }
-    };
-
     let state_arc = state.inner().clone();
 
-    // Claim a new generation. Any previous async loop still alive will
-    // see its captured generation no longer matches and exit silently.
     let my_gen = state_arc.loop_generation.fetch_add(1, Ordering::SeqCst) + 1;
-
-    // Reset all shared state so this run starts clean. The generation bump
-    // above guarantees the old loops won't overwrite this state on their way out.
-    state_arc.sio_connected.store(false, Ordering::SeqCst);
-    if let Ok(mut guard) = state_arc.sio_client.lock() {
-        *guard = None;
-    }
-    if let Ok(mut last) = state_arc.last_sent_player.lock() {
+    if let Ok(mut last) = state_arc.last_sent_camera.lock() {
         *last = None;
-    }
-    if let Ok(mut streak) = state_arc.no_match_streak.lock() {
-        *streak = 0;
-    }
-
-    // If server sync is enabled, auto-fetch players + connect Socket.io
-    if config.server.enabled && !config.server.ws_url.is_empty() {
-        // Auto-fetch players if not already loaded
-        let fp_empty = state_arc.fetched_players.lock().map(|fp| fp.is_empty()).unwrap_or(true);
-        if fp_empty && !config.server.api_url.is_empty()
-            && !config.server.tournament_id.is_empty()
-            && !config.server.secret_key.is_empty()
-        {
-            let _ = app.emit("log", LogEvent {
-                level: "info".into(),
-                message: "Auto-fetching players from server...".into(),
-            });
-            match auto_fetch_players(&app, &state_arc, &config).await {
-                Ok(count) => {
-                    let _ = app.emit("log", LogEvent {
-                        level: "success".into(),
-                        message: format!("Auto-fetched {} players from server", count),
-                    });
-                }
-                Err(e) => {
-                    let _ = app.emit("log", LogEvent {
-                        level: "warning".into(),
-                        message: format!("Auto-fetch failed: {} — click Fetch Players manually", e),
-                    });
-                }
-            }
-        }
-
-        let state_ws = state_arc.clone();
-        let app_ws = app.clone();
-        // Resolve source_id before building the URL.
-        let source_id: Option<String> = if config.server.source_mode {
-            if config.server.source_id.is_empty() {
-                let _ = app.emit("log", LogEvent {
-                    level: "warning".into(),
-                    message: "source_mode is ON but source_id is empty — defaulting to Source 01. Set a source slot in Settings.".into(),
-                });
-                Some("01".to_string())
-            } else {
-                Some(config.server.source_id.clone())
-            }
-        } else {
-            None
-        };
-
-        // Pass credentials as URL query params — server validates on connection,
-        // no Socket.IO auth event or ack needed. Far more reliable than emit_with_ack.
-        let base_url = config.server.ws_url.trim_end_matches('/');
-        let server_url = {
-            let mut url = format!(
-                "{}?ocrKey={}&tournamentId={}",
-                base_url,
-                url_encode(&config.server.secret_key),
-                url_encode(&config.server.tournament_id),
-            );
-            if let Some(ref sid) = source_id {
-                url.push_str(&format!("&sourceId={}", url_encode(sid)));
-            }
-            url
-        };
-
-        tokio::spawn(async move {
-            run_socketio_loop(app_ws, state_ws, server_url, source_id, my_gen).await;
-        });
     }
 
     let app_ocr = app.clone();
@@ -960,277 +793,17 @@ async fn start_ocr(
 
     Ok(CommandResult {
         success: true,
-        message: "OCR capture started (Rust native)".into(),
+        message: "OCR capture started".into(),
     })
 }
 
-/// Maintains a persistent Socket.io connection to the server.
-/// Authenticates via "ocrAuth" event, then stores the client so the OCR loop
-/// can emit "playerDetected" / "noMatch" events directly.
-/// Reconnects automatically if the connection drops while OCR is running.
-async fn run_socketio_loop(
-    app: AppHandle,
-    state: Arc<OcrState>,
-    server_url: String,
-    source_id: Option<String>,
-    my_gen: u64,
-) {
-    let reconnect_delay = Duration::from_secs(5);
-
-    // Helper: are we still the current generation? If not, a newer start_ocr()
-    // has superseded us — exit silently without touching shared state.
-    let is_current = |state: &Arc<OcrState>| state.loop_generation.load(Ordering::SeqCst) == my_gen;
-
-    while state.running.load(Ordering::SeqCst) && is_current(&state) {
-        let mode_label = match &source_id {
-            Some(sid) => format!("source mode (Source {})", sid),
-            None => "global mode".to_string(),
-        };
-        let _ = app.emit(
-            "log",
-            LogEvent {
-                level: "info".into(),
-                message: format!("Connecting to {} — {}", server_url, mode_label),
-            },
-        );
-
-        // Create auth signalling state for this connection attempt.
-        // These are shared between the ocrAuthSuccess/Failed event handlers
-        // (registered in ClientBuilder) and the code that waits below.
-        let auth_result = Arc::new(tokio::sync::Notify::new());
-        let auth_success = Arc::new(AtomicBool::new(false));
-
-        // Clone handles for all event callbacks. Capture `my_gen` (Copy u64) so
-        // callbacks can verify they belong to the active generation.
-        let app_conn   = app.clone();
-        let app_disc   = app.clone();
-        let app_ok     = app.clone();
-        let app_fail   = app.clone();
-        let state_disc = state.clone();
-        let state_ok   = state.clone();
-        let state_fail = state.clone();
-        let notify_ok   = auth_result.clone();
-        let notify_fail = auth_result.clone();
-        let success_ok  = auth_success.clone();
-        let source_id_log = source_id.clone();
-        let cb_gen = my_gen;
-
-        let result = ClientBuilder::new(&server_url)
-            .namespace("/")
-            .on("connect", move |_payload, _client| {
-                let a = app_conn.clone();
-                async move {
-                    let _ = a.emit("ws_status", serde_json::json!({ "connected": true }));
-                    let _ = a.emit("log", LogEvent {
-                        level: "success".into(),
-                        message: "Socket.io connected to server".into(),
-                    });
-                }
-                .boxed()
-            })
-            .on("disconnect", move |_payload, _client| {
-                let a = app_disc.clone();
-                let s = state_disc.clone();
-                async move {
-                    if s.loop_generation.load(Ordering::SeqCst) == cb_gen {
-                        let _ = a.emit("ws_status", serde_json::json!({ "connected": false }));
-                        let _ = a.emit("log", LogEvent {
-                            level: "warning".into(),
-                            message: "Socket.io disconnected from server".into(),
-                        });
-                        s.sio_connected.store(false, Ordering::SeqCst);
-                    }
-                }
-                .boxed()
-            })
-            // Server emits ocrAuthSuccess after processing ocrAuth (in addition to
-            // the ack callback). We listen for this event because rust_socketio v0.6
-            // does not reliably invoke emit_with_ack callbacks.
-            .on("ocrAuthSuccess", move |_payload, _client| {
-                let a = app_ok.clone();
-                let s = state_ok.clone();
-                let n = notify_ok.clone();
-                let sc = success_ok.clone();
-                let sid_log = source_id_log.clone();
-                async move {
-                    sc.store(true, Ordering::SeqCst);
-                    if s.loop_generation.load(Ordering::SeqCst) == cb_gen {
-                        s.sio_connected.store(true, Ordering::SeqCst);
-                        if let Ok(mut last) = s.last_sent_player.lock() {
-                            *last = None;
-                        }
-                        let mode_label = match sid_log.as_deref() {
-                            Some(sid) => format!("source mode (Source {})", sid),
-                            None => "global mode".to_string(),
-                        };
-                        // Emit ws_status first so the UI shows "Connected" before "Authenticated".
-                        // The on("connect") callback in rust_socketio is unreliable — this
-                        // guarantees ws_status is always set when auth succeeds.
-                        let _ = a.emit("ws_status", serde_json::json!({ "connected": true }));
-                        let _ = a.emit("log", LogEvent {
-                            level: "success".into(),
-                            message: format!("OCR authenticated — {}", mode_label),
-                        });
-                        let _ = a.emit("ocr_authenticated", ());
-                    }
-                    n.notify_one();
-                }
-                .boxed()
-            })
-            .on("ocrAuthFailed", move |payload, _client| {
-                let a = app_fail.clone();
-                let s = state_fail.clone();
-                let n = notify_fail.clone();
-                async move {
-                    if s.loop_generation.load(Ordering::SeqCst) == cb_gen {
-                        let msg = match &payload {
-                            Payload::Text(values) => values
-                                .first()
-                                .and_then(|v| v.get("message"))
-                                .and_then(|v| v.as_str())
-                                .unwrap_or("unknown reason")
-                                .to_string(),
-                            _ => "unknown reason".to_string(),
-                        };
-                        let _ = a.emit("log", LogEvent {
-                            level: "error".into(),
-                            message: format!("OCR auth rejected: {msg}"),
-                        });
-                    }
-                    n.notify_one();
-                }
-                .boxed()
-            })
-            .connect()
-            .await;
-
-        match result {
-            Ok(client) => {
-                // A newer generation took over while we were connecting — bail out.
-                if !is_current(&state) {
-                    let _ = client.disconnect().await;
-                    break;
-                }
-
-                // Store client so the OCR loop can send events once auth succeeds.
-                {
-                    let mut guard = state.sio_client.lock().unwrap();
-                    *guard = Some(client.clone());
-                }
-
-                // Credentials were passed in the URL query string — the server validates
-                // them in io.on("connection") and immediately emits ocrAuthSuccess back.
-                // No emit_with_ack, no event round-trip, no ack callback issues.
-                // Just wait for the ocrAuthSuccess event (registered in ClientBuilder).
-                let ack_wait = tokio::time::timeout(
-                    Duration::from_secs(15),
-                    auth_result.notified(),
-                ).await;
-
-                if ack_wait.is_err() {
-                    let _ = app.emit("log", LogEvent {
-                        level: "error".into(),
-                        message: "ocrAuth timed out — server did not respond within 15s".into(),
-                    });
-                }
-
-                if !auth_success.load(Ordering::SeqCst) {
-                    // Auth failed — stop trying. Disconnect this client.
-                    // Only mutate shared state if we're still the current generation —
-                    // a newer start_ocr() may have already taken over and we must not
-                    // wipe its state or kill its `running` flag.
-                    let _ = client.disconnect().await;
-                    if is_current(&state) {
-                        if let Ok(mut g) = state.sio_client.lock() { *g = None; }
-                        state.running.store(false, Ordering::SeqCst);
-                    }
-                    break;
-                }
-
-                // Stay alive while OCR is running, connected, and we're still the
-                // active generation. If a new start_ocr() bumps the generation, exit fast.
-                while state.running.load(Ordering::SeqCst)
-                    && state.sio_connected.load(Ordering::SeqCst)
-                    && is_current(&state)
-                {
-                    tokio::time::sleep(Duration::from_secs(1)).await;
-                }
-
-                // Always disconnect this client — this triggers server-side
-                // socket.on("disconnect") which emits ocrOffline to the controller.
-                let _ = client.disconnect().await;
-
-                // Only mutate shared state if we're still the current generation.
-                // A superseded loop must not touch sio_connected / sio_client / last_sent_player —
-                // those now belong to the new generation's loop.
-                if is_current(&state) {
-                    let _ = app.emit("ws_status", serde_json::json!({ "connected": false }));
-                    // Only reset shared state when reconnecting (running = true). When the
-                    // user stopped (running = false), start_ocr() owns the next reset.
-                    if state.running.load(Ordering::SeqCst) {
-                        state.sio_connected.store(false, Ordering::SeqCst);
-                        if let Ok(mut guard) = state.sio_client.lock() {
-                            *guard = None;
-                        }
-                        if let Ok(mut lp) = state.last_sent_player.lock() {
-                            *lp = None;
-                        }
-                    }
-                }
-            }
-            Err(e) => {
-                let _ = app.emit(
-                    "log",
-                    LogEvent {
-                        level: "warning".into(),
-                        message: format!("Socket.io connect failed: {e}. Retrying in 5s..."),
-                    },
-                );
-            }
-        }
-
-        // Exit if user stopped OR a newer generation has taken over.
-        if !state.running.load(Ordering::SeqCst) || !is_current(&state) {
-            break;
-        }
-
-        tokio::time::sleep(reconnect_delay).await;
-    }
-
-    // Final cleanup — only if we're still the current generation.
-    // A superseded loop must NEVER wipe shared state on its way out.
-    if is_current(&state) {
-        state.sio_connected.store(false, Ordering::SeqCst);
-        if let Ok(mut guard) = state.sio_client.lock() {
-            *guard = None;
-        }
-        if let Ok(mut lp) = state.last_sent_player.lock() {
-            *lp = None;
-        }
-    }
-}
-
 async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
-    // Helper: are we still the current generation? If not, a newer start_ocr()
-    // has superseded us — exit silently without touching shared state.
-    let is_current = |state: &Arc<OcrState>| state.loop_generation.load(Ordering::SeqCst) == my_gen;
+    let is_current = |s: &Arc<OcrState>| s.loop_generation.load(Ordering::SeqCst) == my_gen;
 
-    // start_ocr() already reset last_sent_player for the new generation.
-    // Don't reset here — that could race with the new generation if this is
-    // a stale loop being torn down.
-
-    // Load config
     let config: AppConfig = match load_config() {
         Ok(c) => c,
         Err(e) => {
-            let _ = app.emit(
-                "log",
-                LogEvent {
-                    level: "error".into(),
-                    message: format!("Failed to load config: {e}"),
-                },
-            );
-            // Only kill running and emit ocr_stopped if we're still the active loop.
+            let _ = app.emit("log", LogEvent { level: "error".into(), message: format!("Failed to load config: {e}") });
             if is_current(&state) {
                 state.running.store(false, Ordering::SeqCst);
                 let _ = app.emit("ocr_stopped", ());
@@ -1241,71 +814,32 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
 
     let capture_interval = config.capture.interval_seconds.max(0.1);
     let confidence_threshold = config.ocr.confidence_threshold as f32;
+    let debounce = Duration::from_millis(config.vmix.debounce_ms);
+    let clear_timeout = Duration::from_millis(config.vmix.clear_timeout_ms);
+    let vmix = config.vmix.clone();
+    let cam_map = config.player_camera_map.clone();
 
-    // If server is enabled, wait for auth to complete before starting detection.
-    // This prevents detection logs from spamming before the connection is ready.
-    if config.server.enabled && !config.server.ws_url.is_empty() {
-        let _ = app.emit("log", LogEvent {
-            level: "info".into(),
-            message: "Waiting for server connection...".into(),
-        });
-        while state.running.load(Ordering::SeqCst)
-            && is_current(&state)
-            && !state.sio_connected.load(Ordering::SeqCst)
-        {
-            tokio::time::sleep(Duration::from_millis(200)).await;
-        }
-        if !state.running.load(Ordering::SeqCst) || !is_current(&state) {
-            return;
-        }
-    }
+    let _ = app.emit("log", LogEvent { level: "info".into(), message: "OCR engine started (Rust native ONNX)".into() });
 
-    // Log player count only after connection is ready (or if no server)
-    {
-        let fp_count = state.fetched_players.lock().map(|fp| fp.len()).unwrap_or(0);
-        let _ = app.emit("log", LogEvent {
-            level: if fp_count > 0 { "success".into() } else { "warning".into() },
-            message: format!("Player ID lookup: {} players loaded{}", fp_count,
-                if fp_count == 0 { " — click Fetch Players in Settings first!" } else { "" }),
-        });
-    }
-
-    let _ = app.emit(
-        "log",
-        LogEvent {
-            level: "info".into(),
-            message: "OCR engine started (Rust native ONNX)".into(),
-        },
-    );
+    // Local debounce state — no mutex needed, all in this async task
+    let mut pending_name: Option<String> = None;
+    let mut pending_since: Option<std::time::Instant> = None;
+    let mut blank_since: Option<std::time::Instant> = None;
 
     let mut ticker = interval(Duration::from_secs_f64(capture_interval));
 
     while state.running.load(Ordering::SeqCst) && is_current(&state) {
         ticker.tick().await;
 
-        // Capture frame based on input source type
         let region = &config.input_source.window_region;
         let img_result = if config.input_source.source_type == "window" {
             let hwnd = config.input_source.window_hwnd as isize;
             if hwnd == 0 {
-                // No window selected — capture screen region
-                capture::capture_screen_region(
-                    region.left,
-                    region.top,
-                    region.width.max(0) as u32,
-                    region.height.max(0) as u32,
-                )
+                capture::capture_screen_region(region.left, region.top, region.width.max(0) as u32, region.height.max(0) as u32)
             } else {
-                capture::capture_window_region(
-                    hwnd,
-                    region.left,
-                    region.top,
-                    region.width.max(0) as u32,
-                    region.height.max(0) as u32,
-                )
+                capture::capture_window_region(hwnd, region.left, region.top, region.width.max(0) as u32, region.height.max(0) as u32)
             }
         } else {
-            // Camera mode: capture frame from camera, then crop to region
             let cam_idx = config.input_source.camera_index;
             capture::capture_camera_frame(cam_idx).and_then(|full| {
                 let rw = region.width.max(0) as u32;
@@ -1325,203 +859,192 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
         let img = match img_result {
             Ok(img) => img,
             Err(e) => {
-                let _ = app.emit(
-                    "log",
-                    LogEvent {
-                        level: "error".into(),
-                        message: format!("Capture failed: {e}"),
-                    },
-                );
+                let _ = app.emit("log", LogEvent { level: "error".into(), message: format!("Capture failed: {e}") });
                 continue;
             }
         };
 
-        // Encode preview image
         let preview_b64 = capture::image_to_base64_jpeg(&img).unwrap_or_default();
-
-        // Run OCR (blocking work — run on blocking thread pool)
         let preprocessed = capture::preprocess_for_ocr(&img);
         let ocr_results = tokio::task::spawn_blocking(move || ocr::run_ocr(&preprocessed)).await;
 
         let results = match ocr_results {
             Ok(Ok(r)) => r,
             Ok(Err(e)) => {
-                let _ = app.emit(
-                    "log",
-                    LogEvent {
-                        level: "error".into(),
-                        message: format!("OCR failed: {e}"),
-                    },
-                );
-                // Still send preview with no detections
+                let _ = app.emit("log", LogEvent { level: "error".into(), message: format!("OCR failed: {e}") });
                 send_preview(&app, &preview_b64, &[]);
                 continue;
             }
             Err(e) => {
-                let _ = app.emit(
-                    "log",
-                    LogEvent {
-                        level: "error".into(),
-                        message: format!("OCR task panicked: {e}"),
-                    },
-                );
+                let _ = app.emit("log", LogEvent { level: "error".into(), message: format!("OCR task panicked: {e}") });
                 continue;
             }
         };
 
-        // Match results against player names (scoped to drop MutexGuard before await)
         let detections = {
             let matcher_guard = state.matcher.lock().unwrap();
             let mut dets = Vec::new();
-
             for result in &results {
                 if result.confidence >= confidence_threshold {
-                    let matched =
-                        matcher_guard.find_match(&result.text, result.confidence as f64);
+                    let matched = matcher_guard.find_match(&result.text, result.confidence as f64);
                     dets.push(matched);
                 }
             }
             dets
         };
 
-        // Send preview with detections
         send_preview(&app, &preview_b64, &detections);
 
-        // Send OCR result to server via Socket.io
-        {
-            let best_match = detections
-                .iter()
-                .filter(|d| d.matched_name.is_some())
-                .max_by(|a, b| {
-                    a.match_score
-                        .partial_cmp(&b.match_score)
-                        .unwrap_or(std::cmp::Ordering::Equal)
-                });
+        // Find best matched name
+        let best_name: Option<String> = detections
+            .iter()
+            .filter(|d| d.matched_name.is_some())
+            .max_by(|a, b| a.match_score.partial_cmp(&b.match_score).unwrap_or(std::cmp::Ordering::Equal))
+            .and_then(|d| d.matched_name.clone());
 
-            // Resolve current detected player ID (or None for noMatch)
-            let current_player_id: Option<String> = best_match.and_then(|det| {
-                let fp = state.fetched_players.lock().unwrap();
-                fp.iter()
-                    .find(|p| {
-                        p.ign.to_lowercase()
-                            == det
-                                .matched_name
-                                .as_deref()
-                                .unwrap_or("")
-                                .to_lowercase()
-                    })
-                    .map(|p| p.id.clone())
-            });
+        let now = std::time::Instant::now();
 
-            // Anti-flicker: require 3 consecutive "no match" scans before sending noMatch.
-            // This prevents brief OCR failures from clearing the active player.
-            const NO_MATCH_THRESHOLD: u32 = 3;
+        if let Some(ref name) = best_name {
+            // Player detected — reset blank timer
+            blank_since = None;
 
-            let effective_player_id: Option<String> = if current_player_id.is_some() {
-                // Player detected — reset streak and use the ID
-                if let Ok(mut streak) = state.no_match_streak.lock() {
-                    *streak = 0;
-                }
-                current_player_id.clone()
-            } else {
-                // No match — increment streak
-                let streak_val = {
-                    let mut streak = state.no_match_streak.lock().unwrap();
-                    *streak += 1;
-                    *streak
-                };
-                if streak_val >= NO_MATCH_THRESHOLD {
-                    None // actually send noMatch after N consecutive misses
-                } else {
-                    continue; // skip this scan, don't send anything yet
-                }
-            };
+            if pending_name.as_deref() == Some(name.as_str()) {
+                // Same name as pending — check if debounce window elapsed
+                if let Some(since) = pending_since {
+                    if now.duration_since(since) >= debounce {
+                        // Stable — look up vMix camera input
+                        let camera_input = cam_map.iter()
+                            .find(|(k, _)| k.to_uppercase() == name.to_uppercase())
+                            .map(|(_, v)| v.clone());
 
-            // Dedup: compare against last sent value.
-            // `last_sent_player` is Option<Option<String>>:
-            //   None = sentinel (never sent) → always send
-            //   Some(x) = previously sent value → only send if changed
-            let changed = {
-                let last = state.last_sent_player.lock().unwrap();
-                match &*last {
-                    None => true, // first send this session — always go
-                    Some(prev) => *prev != effective_player_id,
-                }
-            };
+                        if let Some(ref cam) = camera_input {
+                            let changed = {
+                                let last = state.last_sent_camera.lock().unwrap();
+                                last.as_deref() != Some(cam.as_str())
+                            };
+                            if changed {
+                                let det = detections.iter().find(|d| d.matched_name.as_deref() == Some(name.as_str()));
+                                let raw = det.map(|d| d.raw_text.as_str()).unwrap_or("—");
+                                let conf = det.map(|d| d.confidence).unwrap_or(0.0);
+                                let fuzz = det.map(|d| d.match_score).unwrap_or(0.0);
+                                let _ = app.emit("log", LogEvent {
+                                    level: "success".into(),
+                                    message: format!("\"{}\" → {} (conf: {:.0}%, fuzz: {:.0}%)", raw, name, conf * 100.0, fuzz),
+                                });
 
-            if changed {
-                let matched_name = best_match
-                    .and_then(|d| d.matched_name.as_deref())
-                    .unwrap_or("No match");
-                let raw_text = best_match
-                    .map(|d| d.raw_text.as_str())
-                    .unwrap_or("—");
-                let confidence = best_match.map(|d| d.confidence).unwrap_or(0.0);
-                let fuzz = best_match.map(|d| d.match_score).unwrap_or(0.0);
+                                if !vmix.target_sources.is_empty() {
+                                    let cam_clone = cam.clone();
+                                    let vmix_clone = vmix.clone();
+                                    let app_clone = app.clone();
+                                    let results = call_vmix_set_layer(
+                                        &vmix_clone.ip,
+                                        vmix_clone.port,
+                                        vmix_clone.layer,
+                                        &vmix_clone.target_sources,
+                                        Some(&cam_clone),
+                                    ).await;
+                                    let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+                                    if errors.is_empty() {
+                                        let _ = app_clone.emit("log", LogEvent {
+                                            level: "info".into(),
+                                            message: format!("[vMix] → {} on {} source(s) — Layer {}", cam_clone, vmix_clone.target_sources.len(), vmix_clone.layer),
+                                        });
+                                        let _ = app_clone.emit("vmix_action", serde_json::json!({
+                                            "player": name,
+                                            "camera": cam_clone,
+                                            "layer": vmix_clone.layer,
+                                            "cleared": false
+                                        }));
+                                    } else {
+                                        for e in &errors {
+                                            let _ = app_clone.emit("log", LogEvent { level: "error".into(), message: format!("[vMix] {e}") });
+                                        }
+                                    }
+                                } else {
+                                    let _ = app.emit("log", LogEvent {
+                                        level: "warning".into(),
+                                        message: "[vMix] No target sources configured — add sources in Settings".into(),
+                                    });
+                                }
 
-                let level = if effective_player_id.is_some() { "success" } else { "info" };
-                let _ = app.emit(
-                    "log",
-                    LogEvent {
-                        level: level.into(),
-                        message: format!(
-                            "\"{}\" → {} (conf: {:.0}%, fuzz: {:.0})",
-                            raw_text, matched_name, confidence * 100.0, fuzz
-                        ),
-                    },
-                );
-
-                // Update dedup at log time so we don't spam the same detection
-                // repeatedly before auth completes. It gets reset to None when
-                // ocrAuthSuccess fires, ensuring the player is sent to the server
-                // on the first detection after authentication.
-                if let Ok(mut last) = state.last_sent_player.lock() {
-                    *last = Some(effective_player_id.clone());
-                }
-
-                // Send to server — only after ocrAuth is confirmed (sio_connected = true)
-                // AND we're still the active generation. Gating on generation prevents a
-                // stale OCR loop from overwriting last_sent_player after a new start_ocr()
-                // has reset it. Gating on sio_connected prevents a race where the socket
-                // is connected but auth hasn't completed.
-                let client_opt = if is_current(&state) && state.sio_connected.load(Ordering::SeqCst) {
-                    state.sio_client.lock().ok().and_then(|g| g.clone())
-                } else {
-                    None
-                };
-                if let Some(client) = client_opt {
-                    match &effective_player_id {
-                        Some(pid) => {
-                            let _ = app.emit("log", LogEvent {
-                                level: "info".into(),
-                                message: format!("[Socket] Sending playerDetected: {}", pid),
-                            });
-                            let _ = client
-                                .emit("playerDetected", serde_json::json!({ "playerId": pid }))
-                                .await;
+                                if let Ok(mut last) = state.last_sent_camera.lock() {
+                                    *last = Some(cam.clone());
+                                }
+                            }
+                        } else {
+                            // Name matched but not in mapping table
+                            let changed = state.last_sent_camera.lock()
+                                .map(|l| l.is_some())
+                                .unwrap_or(false);
+                            if changed {
+                                let _ = app.emit("log", LogEvent {
+                                    level: "warning".into(),
+                                    message: format!("[vMix] \"{}\" matched but has no camera mapping — configure in Mapping tab", name),
+                                });
+                            }
                         }
-                        None => {
-                            let _ = app.emit("log", LogEvent {
+                        // Keep pending so we don't re-log on every tick
+                    }
+                }
+            } else {
+                // New name — start debounce window
+                pending_name = Some(name.clone());
+                pending_since = Some(now);
+            }
+        } else {
+            // No match
+            pending_name = None;
+            pending_since = None;
+
+            // Check clear-timeout
+            let last_sent_is_some = state.last_sent_camera.lock()
+                .map(|l| l.is_some())
+                .unwrap_or(false);
+
+            if last_sent_is_some {
+                if blank_since.is_none() {
+                    blank_since = Some(now);
+                } else if now.duration_since(blank_since.unwrap()) >= clear_timeout {
+                    // Clear the layer
+                    if !vmix.target_sources.is_empty() {
+                        let vmix_clone = vmix.clone();
+                        let app_clone = app.clone();
+                        let results = call_vmix_set_layer(
+                            &vmix_clone.ip,
+                            vmix_clone.port,
+                            vmix_clone.layer,
+                            &vmix_clone.target_sources,
+                            None,
+                        ).await;
+                        let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
+                        if errors.is_empty() {
+                            let _ = app_clone.emit("log", LogEvent {
                                 level: "info".into(),
-                                message: "[Socket] Sending noMatch".into(),
+                                message: format!("[vMix] Layer {} cleared (blank timeout)", vmix_clone.layer),
                             });
-                            let _ = client.emit("noMatch", serde_json::json!({})).await;
+                            let _ = app_clone.emit("vmix_action", serde_json::json!({
+                                "player": null,
+                                "camera": null,
+                                "layer": vmix_clone.layer,
+                                "cleared": true
+                            }));
+                        } else {
+                            for e in &errors {
+                                let _ = app_clone.emit("log", LogEvent { level: "error".into(), message: format!("[vMix] {e}") });
+                            }
                         }
                     }
+                    if let Ok(mut last) = state.last_sent_camera.lock() {
+                        *last = None;
+                    }
+                    blank_since = None;
                 }
             }
         }
     }
 
-    // Only emit the log if we're still the current generation — a superseded loop
-    // must not log "stopped" when OCR is still running under a new generation.
-    // Note: ocr_stopped and ws_status are emitted immediately by stop_ocr(), so
-    // we don't re-emit them here.
     if is_current(&state) {
-        let _ = app.emit("log", LogEvent {
-            level: "warning".into(),
-            message: "OCR capture stopped".into(),
-        });
+        let _ = app.emit("log", LogEvent { level: "warning".into(), message: "OCR capture stopped".into() });
     }
 }
 
@@ -1530,18 +1053,12 @@ fn send_preview(app: &AppHandle, image_b64: &str, detections: &[matcher::MatchRe
         "image": image_b64,
         "detections": detections
     });
-    let _ = app.emit(
-        "log",
-        LogEvent {
-            level: "preview".into(),
-            message: preview_json.to_string(),
-        },
-    );
+    let _ = app.emit("log", LogEvent {
+        level: "preview".into(),
+        message: preview_json.to_string(),
+    });
 }
 
-/// Returns the current OCR running state. Used by the frontend on mount/reload
-/// to sync UI state with the actual Rust state — survives webview reloads,
-/// HMR, and tab switches.
 #[tauri::command]
 fn is_ocr_running(state: tauri::State<'_, Arc<OcrState>>) -> bool {
     state.running.load(Ordering::SeqCst)
@@ -1553,34 +1070,20 @@ async fn stop_ocr(
     state: tauri::State<'_, Arc<OcrState>>,
 ) -> Result<CommandResult, String> {
     if state.running.swap(false, Ordering::SeqCst) {
-        // Immediately tell the frontend state is clean — don't wait for async loops.
-        let _ = app.emit("ws_status", serde_json::json!({ "connected": false }));
         let _ = app.emit("ocr_stopped", ());
-        Ok(CommandResult {
-            success: true,
-            message: "OCR capture stopped".into(),
-        })
+        Ok(CommandResult { success: true, message: "OCR capture stopped".into() })
     } else {
-        Ok(CommandResult {
-            success: false,
-            message: "No OCR process is running".into(),
-        })
+        Ok(CommandResult { success: false, message: "No OCR process is running".into() })
     }
 }
 
 #[tauri::command]
 fn check_backend(app: AppHandle) -> Result<CommandResult, String> {
     if ocr::is_initialized() {
-        return Ok(CommandResult {
-            success: true,
-            message: "Rust native OCR (ONNX Runtime)".into(),
-        });
+        return Ok(CommandResult { success: true, message: "Rust native OCR (ONNX Runtime)".into() });
     }
-
-    // OCR not initialized — try to find models and initialize now
     match find_models_dir(&app) {
         Some(dir) => {
-            // Try to initialize OCR with the found models
             match ocr::init_ocr(&dir) {
                 Ok(()) => {
                     println!("[INFO] OCR models lazy-loaded from: {}", dir.display());
@@ -1605,42 +1108,7 @@ fn check_backend(app: AppHandle) -> Result<CommandResult, String> {
     }
 }
 
-/// Ping /api/health on the configured API server via Rust reqwest (no CORS).
-/// Returns { success: true } if the server responds with HTTP 200, false otherwise.
-#[tauri::command]
-async fn check_server_health() -> Result<CommandResult, String> {
-    let config = match load_config() {
-        Ok(c) => c,
-        Err(_) => return Ok(CommandResult { success: false, message: "Config not loaded".into() }),
-    };
-
-    if !config.server.enabled || config.server.api_url.is_empty() {
-        return Ok(CommandResult { success: false, message: "Server sync disabled".into() });
-    }
-
-    let url = format!("{}/api/health", config.server.api_url.trim_end_matches('/'));
-    let client = HttpClient::builder()
-        .timeout(std::time::Duration::from_secs(5))
-        .build()
-        .map_err(|e| format!("HTTP client error: {e}"))?;
-
-    match client.get(&url).send().await {
-        Ok(resp) if resp.status().is_success() => Ok(CommandResult {
-            success: true,
-            message: "Server online".into(),
-        }),
-        Ok(resp) => Ok(CommandResult {
-            success: false,
-            message: format!("Server returned {}", resp.status()),
-        }),
-        Err(e) => Ok(CommandResult {
-            success: false,
-            message: format!("Unreachable: {e}"),
-        }),
-    }
-}
-
-// ── Region Selectors ────────────────────────────────────────────────
+// ── Region Selectors ─────────────────────────────────────────────────
 
 #[tauri::command]
 async fn open_window_region_selector(
@@ -1648,35 +1116,24 @@ async fn open_window_region_selector(
     hwnd: i64,
     rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
 ) -> Result<CommandResult, String> {
-    let _ = app.emit(
-        "log",
-        LogEvent {
-            level: "info".into(),
-            message: format!("Capturing window (HWND {hwnd}) for region selection..."),
-        },
-    );
+    let _ = app.emit("log", LogEvent {
+        level: "info".into(),
+        message: format!("Capturing window (HWND {hwnd}) for region selection..."),
+    });
 
-    // Capture the full window
     let img = capture::capture_window_region(hwnd as isize, 0, 0, 0, 0)
         .map_err(|e| format!("Failed to capture window: {e}"))?;
-
     let b64 = capture::image_to_base64_jpeg(&img)
         .map_err(|e| format!("Failed to encode image: {e}"))?;
 
-    // Store in state
     *rs_state.original_width.lock().unwrap() = img.width();
     *rs_state.original_height.lock().unwrap() = img.height();
     *rs_state.image_b64.lock().unwrap() = Some(b64);
     *rs_state.source_type.lock().unwrap() = "window".into();
     *rs_state.source_hwnd.lock().unwrap() = hwnd;
 
-    // Open the region selector window
     open_region_selector_window(&app)?;
-
-    Ok(CommandResult {
-        success: true,
-        message: "Region selector opened".into(),
-    })
+    Ok(CommandResult { success: true, message: "Region selector opened".into() })
 }
 
 #[tauri::command]
@@ -1685,18 +1142,13 @@ async fn open_camera_region_selector(
     _camera_index: u32,
     rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
 ) -> Result<CommandResult, String> {
-    let _ = app.emit(
-        "log",
-        LogEvent {
-            level: "info".into(),
-            message: format!("Capturing frame from camera {} for region selection...", _camera_index),
-        },
-    );
+    let _ = app.emit("log", LogEvent {
+        level: "info".into(),
+        message: format!("Capturing frame from camera {} for region selection...", _camera_index),
+    });
 
-    // Capture a live frame from the selected camera
     let img = capture::capture_camera_frame(_camera_index)
         .map_err(|e| format!("Failed to capture camera frame: {e}"))?;
-
     let b64 = capture::image_to_base64_jpeg(&img)
         .map_err(|e| format!("Failed to encode image: {e}"))?;
 
@@ -1707,19 +1159,13 @@ async fn open_camera_region_selector(
     *rs_state.source_camera.lock().unwrap() = _camera_index;
 
     open_region_selector_window(&app)?;
-
-    Ok(CommandResult {
-        success: true,
-        message: "Region selector opened".into(),
-    })
+    Ok(CommandResult { success: true, message: "Region selector opened".into() })
 }
 
 fn open_region_selector_window(app: &AppHandle) -> Result<(), String> {
-    // Close and destroy existing selector window if open
     if let Some(existing) = app.get_webview_window("region-selector") {
         let _ = existing.destroy();
     }
-
     let _win = tauri::WebviewWindowBuilder::new(
         app,
         "region-selector",
@@ -1731,7 +1177,6 @@ fn open_region_selector_window(app: &AppHandle) -> Result<(), String> {
     .resizable(true)
     .build()
     .map_err(|e| format!("Failed to open region selector window: {e}"))?;
-
     Ok(())
 }
 
@@ -1743,12 +1188,7 @@ fn get_region_selector_image(
     let image = image.as_ref().ok_or("No image available")?;
     let w = *rs_state.original_width.lock().unwrap();
     let h = *rs_state.original_height.lock().unwrap();
-
-    Ok(serde_json::json!({
-        "image": image,
-        "original_width": w,
-        "original_height": h,
-    }))
+    Ok(serde_json::json!({ "image": image, "original_width": w, "original_height": h }))
 }
 
 #[tauri::command]
@@ -1760,53 +1200,30 @@ async fn save_selected_region(
     height: i32,
     rs_state: tauri::State<'_, Arc<RegionSelectorState>>,
 ) -> Result<CommandResult, String> {
-    // Load current config
     let mut config = load_config()?;
-
     let source_type = rs_state.source_type.lock().unwrap().clone();
-
-    // Update the region in config
-    config.input_source.window_region = WindowRegion {
-        left,
-        top,
-        width,
-        height,
-    };
-
-    // Save config
+    config.input_source.window_region = WindowRegion { left, top, width, height };
     save_config(config)?;
 
-    let _ = app.emit(
-        "log",
-        LogEvent {
-            level: "success".into(),
-            message: format!(
-                "Region saved: ({}, {}) {}x{} [{}]",
-                left, top, width, height, source_type
-            ),
-        },
-    );
-
-    // Notify frontend to reload config
+    let _ = app.emit("log", LogEvent {
+        level: "success".into(),
+        message: format!("Region saved: ({}, {}) {}x{} [{}]", left, top, width, height, source_type),
+    });
     let _ = app.emit("region-saved", ());
-
-    // Clear stored image to free memory
     *rs_state.image_b64.lock().unwrap() = None;
-
     Ok(CommandResult {
         success: true,
         message: format!("Region saved: ({}, {}) {}x{}", left, top, width, height),
     })
 }
 
-// ── App entry ────────────────────────────────────────────────────────
+// ── App Entry ─────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
         .plugin(tauri_plugin_fs::init())
         .setup(|app| {
-            // Initialize ONNX models
             let models_initialized = if let Some(models_dir) = find_models_dir(app.handle()) {
                 match ocr::init_ocr(&models_dir) {
                     Ok(()) => {
@@ -1819,14 +1236,11 @@ pub fn run() {
                     }
                 }
             } else {
-                eprintln!("[WARN] ONNX models directory not found. OCR will not be available until models are placed.");
+                eprintln!("[WARN] ONNX models directory not found.");
                 false
             };
 
-            // Load player names
-            let players: Vec<String> = load_players()
-                .unwrap_or_default();
-
+            let players: Vec<String> = load_players().unwrap_or_default();
             let threshold = match load_config() {
                 Ok(c) => c.ocr.fuzzy_match_threshold as f64,
                 Err(_) => 70.0,
@@ -1834,13 +1248,9 @@ pub fn run() {
 
             app.manage(Arc::new(OcrState {
                 running: AtomicBool::new(false),
-                sio_connected: AtomicBool::new(false),
                 loop_generation: AtomicU64::new(0),
                 matcher: Mutex::new(matcher::FuzzyMatcher::new(players, threshold)),
-                fetched_players: Mutex::new(Vec::new()),
-                sio_client: Mutex::new(None),
-                last_sent_player: Mutex::new(None),
-                no_match_streak: Mutex::new(0),
+                last_sent_camera: Mutex::new(None),
             }));
 
             app.manage(Arc::new(RegionSelectorState {
@@ -1855,7 +1265,7 @@ pub fn run() {
             if models_initialized {
                 println!("[INFO] Efinity FaceCam ready — Rust native OCR active");
             } else {
-                println!("[INFO] Efinity FaceCam ready — OCR models not loaded (check 'models' directory)");
+                println!("[INFO] Efinity FaceCam ready — OCR models not loaded");
             }
 
             Ok(())
@@ -1872,12 +1282,12 @@ pub fn run() {
             add_player,
             remove_player,
             rename_player,
-            fetch_players_from_server,
             start_ocr,
             stop_ocr,
             is_ocr_running,
             check_backend,
-            check_server_health,
+            test_vmix_connection,
+            send_vmix_layer_clear,
             get_region_selector_image,
             save_selected_region,
         ])
