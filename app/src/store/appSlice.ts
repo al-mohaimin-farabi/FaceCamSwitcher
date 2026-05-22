@@ -40,8 +40,8 @@ export interface AppConfig {
     camera_index: number;
   };
   vmix: VmixConfig;
-  /** Maps matched player name → vMix camera input name */
-  player_camera_map: Record<string, string>;
+  /** Maps team tag (e.g. "RHK") → vMix camera input name (e.g. "Camera 1") */
+  team_camera_map: Record<string, string>;
   ocr: {
     language: string;
     confidence_threshold: number;
@@ -163,9 +163,9 @@ export const appSlice = createSlice({
     setVmixTestResult: (state, action: PayloadAction<{ ok: boolean; message: string } | null>) => {
       state.vmixTestResult = action.payload;
     },
-    setPlayerCameraMap: (state, action: PayloadAction<Record<string, string>>) => {
+    setTeamCameraMap: (state, action: PayloadAction<Record<string, string>>) => {
       if (state.config) {
-        state.config.player_camera_map = action.payload;
+        state.config.team_camera_map = action.payload;
       }
     },
   },
@@ -186,7 +186,7 @@ export const {
   setBackendStatus,
   setLastVmixAction,
   setVmixTestResult,
-  setPlayerCameraMap,
+  setTeamCameraMap,
 } = appSlice.actions;
 
 export default appSlice.reducer;
