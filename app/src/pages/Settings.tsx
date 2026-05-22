@@ -23,6 +23,7 @@ import {
   Plus,
   X,
   Zap,
+  // Clock kept for Scan Interval field
 } from "lucide-react";
 
 export default function Settings() {
@@ -259,27 +260,6 @@ export default function Settings() {
               />
             </div>
 
-            {/* Debounce + Clear Timeout */}
-            <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 10 }}>
-              <div className="input-group" style={{ marginBottom: 0 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                  <Clock size={11} style={{ color: "var(--text-muted)" }} /> Debounce (ms)
-                </label>
-                <input className="input" type="number" min="200" step="100"
-                  value={config.vmix?.debounce_ms ?? 1500}
-                  onChange={(e) => updateConfig("vmix.debounce_ms", parseInt(e.target.value) || 1500)}
-                />
-              </div>
-              <div className="input-group" style={{ marginBottom: 0 }}>
-                <label style={{ display: "flex", alignItems: "center", gap: 5 }}>
-                  <Clock size={11} style={{ color: "var(--text-muted)" }} /> Clear Timeout (ms)
-                </label>
-                <input className="input" type="number" min="1000" step="500"
-                  value={config.vmix?.clear_timeout_ms ?? 5000}
-                  onChange={(e) => updateConfig("vmix.clear_timeout_ms", parseInt(e.target.value) || 5000)}
-                />
-              </div>
-            </div>
 
             {/* Target Sources */}
             <div>

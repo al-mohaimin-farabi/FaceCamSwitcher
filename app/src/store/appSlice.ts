@@ -21,8 +21,6 @@ export interface VmixConfig {
   port: number;
   layer: number;
   target_sources: string[];
-  debounce_ms: number;
-  clear_timeout_ms: number;
 }
 
 export interface AppConfig {

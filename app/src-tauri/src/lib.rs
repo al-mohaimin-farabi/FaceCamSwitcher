@@ -100,19 +100,11 @@ struct VmixConfig {
     /// SetLayer is fired on every checked source simultaneously.
     #[serde(default)]
     target_sources: Vec<String>,
-    /// Milliseconds a detection must be stable before vMix is called.
-    #[serde(default = "default_debounce_ms")]
-    debounce_ms: u64,
-    /// Milliseconds of blank/no-match before the layer is cleared (SetLayer → None).
-    #[serde(default = "default_clear_timeout_ms")]
-    clear_timeout_ms: u64,
 }
 
 fn default_vmix_ip() -> String { "192.168.1.100".into() }
 fn default_vmix_port() -> u16 { 8088 }
 fn default_vmix_layer() -> u32 { 7 }
-fn default_debounce_ms() -> u64 { 1500 }
-fn default_clear_timeout_ms() -> u64 { 5000 }
 
 impl Default for VmixConfig {
     fn default() -> Self {
@@ -121,8 +113,6 @@ impl Default for VmixConfig {
             port: default_vmix_port(),
             layer: default_vmix_layer(),
             target_sources: Vec::new(),
-            debounce_ms: default_debounce_ms(),
-            clear_timeout_ms: default_clear_timeout_ms(),
         }
     }
 }
@@ -186,9 +176,7 @@ fn ensure_default_config(dir: &PathBuf) {
     "ip": "192.168.1.100",
     "port": 8088,
     "layer": 7,
-    "target_sources": [],
-    "debounce_ms": 1500,
-    "clear_timeout_ms": 5000
+    "target_sources": []
   },
   "team_camera_map": {},
   "ocr": {
@@ -768,17 +756,10 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
 
     let capture_interval = config.capture.interval_seconds.max(0.1);
     let confidence_threshold = config.ocr.confidence_threshold as f32;
-    let debounce = Duration::from_millis(config.vmix.debounce_ms);
-    let clear_timeout = Duration::from_millis(config.vmix.clear_timeout_ms);
     let vmix = config.vmix.clone();
     let cam_map = config.team_camera_map.clone();
 
     let _ = app.emit("log", LogEvent { level: "info".into(), message: "OCR engine started (Rust native ONNX)".into() });
-
-    // Local debounce state — no mutex needed, all in this async task
-    let mut pending_name: Option<String> = None;
-    let mut pending_since: Option<std::time::Instant> = None;
-    let mut blank_since: Option<std::time::Instant> = None;
 
     let mut ticker = interval(Duration::from_secs_f64(capture_interval));
 
@@ -849,150 +830,79 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
 
         send_preview(&app, &preview_b64, &detections);
 
-        // Find best matched name
+        // Find best matched team tag — call vMix immediately on change, no debounce
         let best_name: Option<String> = detections
             .iter()
             .filter(|d| d.matched_name.is_some())
             .max_by(|a, b| a.match_score.partial_cmp(&b.match_score).unwrap_or(std::cmp::Ordering::Equal))
             .and_then(|d| d.matched_name.clone());
 
-        let now = std::time::Instant::now();
-
         if let Some(ref name) = best_name {
-            // Player detected — reset blank timer
-            blank_since = None;
+            let team_tag = name.to_uppercase();
+            let camera_input = cam_map.iter()
+                .find(|(k, _)| k.to_uppercase() == team_tag)
+                .map(|(_, v)| v.clone());
 
-            if pending_name.as_deref() == Some(name.as_str()) {
-                // Same name as pending — check if debounce window elapsed
-                if let Some(since) = pending_since {
-                    if now.duration_since(since) >= debounce {
-                        // matched name IS the team tag — look up in team_camera_map
-                        let team_tag = name.to_uppercase();
-                        let camera_input = cam_map.iter()
-                            .find(|(k, _)| k.to_uppercase() == team_tag)
-                            .map(|(_, v)| v.clone());
+            if let Some(ref cam) = camera_input {
+                let changed = {
+                    let last = state.last_sent_camera.lock().unwrap();
+                    last.as_deref() != Some(cam.as_str())
+                };
+                if changed {
+                    let det  = detections.iter().find(|d| d.matched_name.as_deref() == Some(name.as_str()));
+                    let raw  = det.map(|d| d.raw_text.as_str()).unwrap_or("—");
+                    let conf = det.map(|d| d.confidence).unwrap_or(0.0);
+                    let fuzz = det.map(|d| d.match_score).unwrap_or(0.0);
+                    let _ = app.emit("log", LogEvent {
+                        level: "success".into(),
+                        message: format!("\"{}\" → {} (conf: {:.0}%, fuzz: {:.0}%)", raw, team_tag, conf * 100.0, fuzz),
+                    });
 
-                        if let Some(ref cam) = camera_input {
-                            let changed = {
-                                let last = state.last_sent_camera.lock().unwrap();
-                                last.as_deref() != Some(cam.as_str())
-                            };
-                            if changed {
-                                let det = detections.iter().find(|d| d.matched_name.as_deref() == Some(name.as_str()));
-                                let raw = det.map(|d| d.raw_text.as_str()).unwrap_or("—");
-                                let conf = det.map(|d| d.confidence).unwrap_or(0.0);
-                                let fuzz = det.map(|d| d.match_score).unwrap_or(0.0);
-                                let _ = app.emit("log", LogEvent {
-                                    level: "success".into(),
-                                    message: format!("\"{}\" → {} (conf: {:.0}%, fuzz: {:.0}%)", raw, name, conf * 100.0, fuzz),
-                                });
-
-                                if !vmix.target_sources.is_empty() {
-                                    let cam_clone = cam.clone();
-                                    let vmix_clone = vmix.clone();
-                                    let app_clone = app.clone();
-                                    let results = call_vmix_set_layer(
-                                        &vmix_clone.ip,
-                                        vmix_clone.port,
-                                        vmix_clone.layer,
-                                        &vmix_clone.target_sources,
-                                        Some(&cam_clone),
-                                    ).await;
-                                    let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-                                    if errors.is_empty() {
-                                        let _ = app_clone.emit("log", LogEvent {
-                                            level: "info".into(),
-                                            message: format!("[vMix] → {} on {} source(s) — Layer {}", cam_clone, vmix_clone.target_sources.len(), vmix_clone.layer),
-                                        });
-                                        let _ = app_clone.emit("vmix_action", serde_json::json!({
-                                            "player": team_tag,
-                                            "camera": cam_clone,
-                                            "layer": vmix_clone.layer,
-                                            "cleared": false
-                                        }));
-                                    } else {
-                                        for e in &errors {
-                                            let _ = app_clone.emit("log", LogEvent { level: "error".into(), message: format!("[vMix] {e}") });
-                                        }
-                                    }
-                                } else {
-                                    let _ = app.emit("log", LogEvent {
-                                        level: "warning".into(),
-                                        message: "[vMix] No target sources configured — add sources in Settings".into(),
-                                    });
-                                }
-
-                                if let Ok(mut last) = state.last_sent_camera.lock() {
-                                    *last = Some(cam.clone());
-                                }
-                            }
-                        } else {
-                            // Team has no camera mapping
-                            let changed = state.last_sent_camera.lock()
-                                .map(|l| l.is_some())
-                                .unwrap_or(false);
-                            if changed {
-                                let _ = app.emit("log", LogEvent {
-                                    level: "warning".into(),
-                                    message: format!("[vMix] Team \"{}\" has no camera mapping — configure in Mapping tab", team_tag),
-                                });
-                            }
-                        }
-                        // Keep pending so we don't re-log on every tick
-                    }
-                }
-            } else {
-                // New name — start debounce window
-                pending_name = Some(name.clone());
-                pending_since = Some(now);
-            }
-        } else {
-            // No match
-            pending_name = None;
-            pending_since = None;
-
-            // Check clear-timeout
-            let last_sent_is_some = state.last_sent_camera.lock()
-                .map(|l| l.is_some())
-                .unwrap_or(false);
-
-            if last_sent_is_some {
-                if blank_since.is_none() {
-                    blank_since = Some(now);
-                } else if now.duration_since(blank_since.unwrap()) >= clear_timeout {
-                    // Clear the layer
                     if !vmix.target_sources.is_empty() {
-                        let vmix_clone = vmix.clone();
-                        let app_clone = app.clone();
                         let results = call_vmix_set_layer(
-                            &vmix_clone.ip,
-                            vmix_clone.port,
-                            vmix_clone.layer,
-                            &vmix_clone.target_sources,
-                            None,
+                            &vmix.ip, vmix.port, vmix.layer, &vmix.target_sources, Some(cam),
                         ).await;
                         let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
                         if errors.is_empty() {
-                            let _ = app_clone.emit("log", LogEvent {
+                            let _ = app.emit("log", LogEvent {
                                 level: "info".into(),
-                                message: format!("[vMix] Layer {} cleared (blank timeout)", vmix_clone.layer),
+                                message: format!("[vMix] {} → {} (Layer {})", team_tag, cam, vmix.layer),
                             });
-                            let _ = app_clone.emit("vmix_action", serde_json::json!({
-                                "player": null,
-                                "camera": null,
-                                "layer": vmix_clone.layer,
-                                "cleared": true
+                            let _ = app.emit("vmix_action", serde_json::json!({
+                                "player": team_tag,
+                                "camera": cam,
+                                "layer": vmix.layer,
+                                "cleared": false
                             }));
                         } else {
                             for e in &errors {
-                                let _ = app_clone.emit("log", LogEvent { level: "error".into(), message: format!("[vMix] {e}") });
+                                let _ = app.emit("log", LogEvent { level: "error".into(), message: format!("[vMix] {e}") });
                             }
                         }
+                    } else {
+                        let _ = app.emit("log", LogEvent {
+                            level: "warning".into(),
+                            message: "[vMix] No target sources configured — add sources in Settings".into(),
+                        });
                     }
+
                     if let Ok(mut last) = state.last_sent_camera.lock() {
-                        *last = None;
+                        *last = Some(cam.clone());
                     }
-                    blank_since = None;
+                }
+            } else {
+                // Team detected but no camera mapped — warn once per team change
+                let already_warned = state.last_sent_camera.lock()
+                    .map(|l| l.as_deref() == Some("__no_map__"))
+                    .unwrap_or(false);
+                if !already_warned {
+                    let _ = app.emit("log", LogEvent {
+                        level: "warning".into(),
+                        message: format!("[vMix] Team \"{}\" has no camera mapping — configure in Mapping tab", team_tag),
+                    });
+                    if let Ok(mut last) = state.last_sent_camera.lock() {
+                        *last = Some("__no_map__".into());
+                    }
                 }
             }
         }
