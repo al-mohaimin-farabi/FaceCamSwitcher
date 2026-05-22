@@ -87,18 +87,31 @@ export default function Settings() {
     }
   };
 
+  const saveSourcesNow = async (sources: string[]) => {
+    if (!config) return;
+    const updated = { ...config, vmix: { ...config.vmix, target_sources: sources } };
+    dispatch(updateConfigField({ path: "vmix.target_sources", value: sources }));
+    try {
+      await invoke("save_config", { config: updated });
+    } catch (e) {
+      showMessage(`Auto-save failed: ${e}`, "error");
+    }
+  };
+
   const handleAddSource = () => {
     const trimmed = newSource.trim();
     if (!trimmed || !config) return;
     const sources = config.vmix.target_sources ?? [];
     if (sources.includes(trimmed)) return;
-    updateConfig("vmix.target_sources", [...sources, trimmed]);
+    const updated = [...sources, trimmed];
+    saveSourcesNow(updated);
     setNewSource("");
   };
 
   const handleRemoveSource = (source: string) => {
     if (!config) return;
-    updateConfig("vmix.target_sources", config.vmix.target_sources.filter(s => s !== source));
+    const updated = config.vmix.target_sources.filter(s => s !== source);
+    saveSourcesNow(updated);
   };
 
   if (isLoadingProps || !config) {
