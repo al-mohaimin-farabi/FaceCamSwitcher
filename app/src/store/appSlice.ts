@@ -1,4 +1,4 @@
-import { createSlice, type PayloadAction } from '@reduxjs/toolkit';
+import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 
 export interface LogEntry {
   time: string;
@@ -19,12 +19,24 @@ export interface CameraInfo {
 export interface VmixConfig {
   ip: string;
   port: number;
+  tcp_port: number;
   layer: number;
   target_sources: string[];
 }
 
+export interface DetectionEvent {
+  time: string;
+  player: string | null;
+  camera: string | null;
+  layer: number;
+  cleared: boolean;
+}
+
 export interface AppConfig {
-  saved_regions: Record<string, { left: number; top: number; width: number; height: number }>;
+  saved_regions: Record<
+    string,
+    { left: number; top: number; width: number; height: number }
+  >;
   input_source: {
     type: "window" | "camera";
     window_hwnd: number;
@@ -86,6 +98,7 @@ interface AppState {
   backendStatus: string;
   lastVmixAction: VmixAction | null;
   vmixTestResult: { ok: boolean; message: string } | null;
+  detectionEvents: DetectionEvent[];
 }
 
 const initialState: AppState = {
@@ -100,16 +113,20 @@ const initialState: AppState = {
   backendStatus: "Checking...",
   lastVmixAction: null,
   vmixTestResult: null,
+  detectionEvents: [],
 };
 
 export const appSlice = createSlice({
-  name: 'app',
+  name: "app",
   initialState,
   reducers: {
     setConfig: (state, action: PayloadAction<AppConfig | null>) => {
       state.config = action.payload;
     },
-    updateConfigField: (state, action: PayloadAction<{ path: string; value: any }>) => {
+    updateConfigField: (
+      state,
+      action: PayloadAction<{ path: string; value: any }>,
+    ) => {
       if (!state.config) return;
       const parts = action.payload.path.split(".");
       let obj: any = state.config;
@@ -151,20 +168,38 @@ export const appSlice = createSlice({
     setCameraList: (state, action: PayloadAction<CameraInfo[]>) => {
       state.cameraList = action.payload;
     },
-    setBackendStatus: (state, action: PayloadAction<{ ok: boolean; message: string }>) => {
+    setBackendStatus: (
+      state,
+      action: PayloadAction<{ ok: boolean; message: string }>,
+    ) => {
       state.backendOk = action.payload.ok;
       state.backendStatus = action.payload.message;
     },
     setLastVmixAction: (state, action: PayloadAction<VmixAction | null>) => {
       state.lastVmixAction = action.payload;
     },
-    setVmixTestResult: (state, action: PayloadAction<{ ok: boolean; message: string } | null>) => {
+    setVmixTestResult: (
+      state,
+      action: PayloadAction<{ ok: boolean; message: string } | null>,
+    ) => {
       state.vmixTestResult = action.payload;
     },
-    setTeamCameraMap: (state, action: PayloadAction<Record<string, string>>) => {
+    setTeamCameraMap: (
+      state,
+      action: PayloadAction<Record<string, string>>,
+    ) => {
       if (state.config) {
         state.config.team_camera_map = action.payload;
       }
+    },
+    pushDetectionEvent: (state, action: PayloadAction<DetectionEvent>) => {
+      state.detectionEvents.unshift(action.payload);
+      if (state.detectionEvents.length > 10) {
+        state.detectionEvents.length = 10;
+      }
+    },
+    clearDetectionEvents: (state) => {
+      state.detectionEvents = [];
     },
   },
 });
@@ -185,6 +220,8 @@ export const {
   setLastVmixAction,
   setVmixTestResult,
   setTeamCameraMap,
+  pushDetectionEvent,
+  clearDetectionEvents,
 } = appSlice.actions;
 
 export default appSlice.reducer;

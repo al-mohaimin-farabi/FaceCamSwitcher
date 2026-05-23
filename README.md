@@ -71,11 +71,11 @@ npm install
 
 Then place the ONNX model files in `app/src-tauri/models/`:
 
-| File | Size | Description |
-|------|------|-------------|
-| `det.onnx` | ~88 MB | PaddleOCR DBNet text detection model |
-| `rec.onnx` | ~7.8 MB | PaddleOCR CRNN text recognition model |
-| `en_dict.txt` | ~1.4 KB | Character dictionary for decoding |
+| File          | Size    | Description                           |
+| ------------- | ------- | ------------------------------------- |
+| `det.onnx`    | ~88 MB  | PaddleOCR DBNet text detection model  |
+| `rec.onnx`    | ~7.8 MB | PaddleOCR CRNN text recognition model |
+| `en_dict.txt` | ~1.4 KB | Character dictionary for decoding     |
 
 ---
 
@@ -87,6 +87,7 @@ npm run tauri dev
 ```
 
 This starts:
+
 1. **Vite dev server** on `http://localhost:5173` with hot reload
 2. **Tauri window** pointing to the dev server
 3. **Rust backend** compiled in debug mode
@@ -112,11 +113,11 @@ npm run tauri build
 
 ### Build outputs
 
-| File | Location | Purpose |
-|------|----------|---------|
-| Standalone exe | `FaceCam.exe` (project root) | Run directly for development |
-| DirectML library | `DirectML.dll` (project root) | Required by ONNX Runtime |
-| NSIS installer | `app/src-tauri/target/release/bundle/nsis/FaceCam_0.1.0_x64-setup.exe` | Distribute to users |
+| File             | Location                                                               | Purpose                      |
+| ---------------- | ---------------------------------------------------------------------- | ---------------------------- |
+| Standalone exe   | `FaceCam.exe` (project root)                                           | Run directly for development |
+| DirectML library | `DirectML.dll` (project root)                                          | Required by ONNX Runtime     |
+| NSIS installer   | `app/src-tauri/target/release/bundle/nsis/FaceCam_0.1.0_x64-setup.exe` | Distribute to users          |
 
 > **Important:** Always use `npm run tauri build` — not `cargo build --release` alone. The frontend must be bundled into the Tauri binary.
 
@@ -126,29 +127,29 @@ npm run tauri build
 
 ### Frontend
 
-| Library | Version | Purpose |
-|---------|---------|---------|
-| React | 19 | UI framework |
-| Redux Toolkit | 2.11 | State management |
-| React Router | 7 | Page routing |
-| Tailwind CSS | 4 | Utility-first styling |
-| Radix UI | 1.4 | Headless UI primitives |
-| Lucide React | 0.577 | Icon library |
-| Vite | 7 | Build tool & dev server |
+| Library       | Version | Purpose                 |
+| ------------- | ------- | ----------------------- |
+| React         | 19      | UI framework            |
+| Redux Toolkit | 2.11    | State management        |
+| React Router  | 7       | Page routing            |
+| Tailwind CSS  | 4       | Utility-first styling   |
+| Radix UI      | 1.4     | Headless UI primitives  |
+| Lucide React  | 0.577   | Icon library            |
+| Vite          | 7       | Build tool & dev server |
 
 ### Backend (Rust)
 
-| Crate | Version | Purpose |
-|-------|---------|---------|
-| tauri | 2 | Desktop app framework + IPC |
-| ort | 2.0.0-rc.12 | ONNX Runtime (statically linked + DirectML GPU) |
-| image | 0.25 | Image processing & format conversion |
-| xcap | 0.0.14 | Screen and window capture |
-| nokhwa | 0.10 | Camera capture (Media Foundation backend) |
-| windows | 0.58 | Win32 API: DirectShow, COM, Media Foundation |
-| ndarray | 0.17 | N-dimensional arrays for tensor operations |
-| strsim | 0.11 | Fuzzy string matching (Levenshtein distance) |
-| base64 | 0.22 | Image encoding for frontend preview |
+| Crate   | Version     | Purpose                                         |
+| ------- | ----------- | ----------------------------------------------- |
+| tauri   | 2           | Desktop app framework + IPC                     |
+| ort     | 2.0.0-rc.12 | ONNX Runtime (statically linked + DirectML GPU) |
+| image   | 0.25        | Image processing & format conversion            |
+| xcap    | 0.0.14      | Screen and window capture                       |
+| nokhwa  | 0.10        | Camera capture (Media Foundation backend)       |
+| windows | 0.58        | Win32 API: DirectShow, COM, Media Foundation    |
+| ndarray | 0.17        | N-dimensional arrays for tensor operations      |
+| strsim  | 0.11        | Fuzzy string matching (Levenshtein distance)    |
+| base64  | 0.22        | Image encoding for frontend preview             |
 
 ---
 
@@ -190,52 +191,52 @@ Supports physical webcams and virtual cameras (OBS, vMix). Uses a 4-level fallba
 
 ### Config & State
 
-| Command | Returns | Description |
-|---------|---------|-------------|
-| `load_config()` | `AppConfig` | Load config.json |
-| `save_config(config)` | — | Save config.json |
-| `check_backend()` | `CommandResult` | Check if ONNX models are loaded |
+| Command               | Returns         | Description                     |
+| --------------------- | --------------- | ------------------------------- |
+| `load_config()`       | `AppConfig`     | Load config.json                |
+| `save_config(config)` | —               | Save config.json                |
+| `check_backend()`     | `CommandResult` | Check if ONNX models are loaded |
 
 ### Device Enumeration
 
-| Command | Returns | Description |
-|---------|---------|-------------|
-| `list_windows()` | `Vec<WindowInfo>` | All visible windows (HWND + title) |
+| Command          | Returns           | Description                                            |
+| ---------------- | ----------------- | ------------------------------------------------------ |
+| `list_windows()` | `Vec<WindowInfo>` | All visible windows (HWND + title)                     |
 | `list_cameras()` | `Vec<CameraInfo>` | All cameras (DirectShow primary, MF + nokhwa fallback) |
 
 ### Player Names
 
-| Command | Returns | Description |
-|---------|---------|-------------|
-| `load_players()` | `Vec<String>` | Load from `Players Name.txt` |
-| `save_players(names)` | — | Save to file |
-| `add_player(name)` | — | Add a single name |
-| `remove_player(name)` | — | Remove a name |
+| Command               | Returns       | Description                  |
+| --------------------- | ------------- | ---------------------------- |
+| `load_players()`      | `Vec<String>` | Load from `Players Name.txt` |
+| `save_players(names)` | —             | Save to file                 |
+| `add_player(name)`    | —             | Add a single name            |
+| `remove_player(name)` | —             | Remove a name                |
 
 ### OCR Control
 
-| Command | Returns | Description |
-|---------|---------|-------------|
-| `start_ocr()` | — | Start the capture/OCR loop (runs in tokio task) |
-| `stop_ocr()` | — | Stop the loop |
+| Command       | Returns | Description                                     |
+| ------------- | ------- | ----------------------------------------------- |
+| `start_ocr()` | —       | Start the capture/OCR loop (runs in tokio task) |
+| `stop_ocr()`  | —       | Stop the loop                                   |
 
 ### Region Selection
 
-| Command | Returns | Description |
-|---------|---------|-------------|
-| `open_window_region_selector(hwnd)` | — | Open selector with window screenshot |
-| `open_camera_region_selector(cameraIndex)` | — | Open selector with camera frame |
-| `get_region_selector_image()` | `String` (base64) | Get captured image for the selector UI |
-| `save_selected_region(left, top, width, height)` | — | Save selected region to config |
+| Command                                          | Returns           | Description                            |
+| ------------------------------------------------ | ----------------- | -------------------------------------- |
+| `open_window_region_selector(hwnd)`              | —                 | Open selector with window screenshot   |
+| `open_camera_region_selector(cameraIndex)`       | —                 | Open selector with camera frame        |
+| `get_region_selector_image()`                    | `String` (base64) | Get captured image for the selector UI |
+| `save_selected_region(left, top, width, height)` | —                 | Save selected region to config         |
 
 ### Events (Backend → Frontend)
 
-| Event | Payload | Description |
-|-------|---------|-------------|
-| `log` | `{ level, message }` | Log messages (info, warn, error, success) |
-| `preview` | `{ image, detections }` | OCR results with base64 image |
-| `ocr_stopped` | — | OCR loop has stopped |
-| `region-saved` | — | Region selection confirmed (triggers config reload) |
+| Event          | Payload                 | Description                                         |
+| -------------- | ----------------------- | --------------------------------------------------- |
+| `log`          | `{ level, message }`    | Log messages (info, warn, error, success)           |
+| `preview`      | `{ image, detections }` | OCR results with base64 image                       |
+| `ocr_stopped`  | —                       | OCR loop has stopped                                |
+| `region-saved` | —                       | Region selection confirmed (triggers config reload) |
 
 ---
 
@@ -246,36 +247,39 @@ Supports physical webcams and virtual cameras (OBS, vMix). Uses a 4-level fallba
 ```jsonc
 {
   "input_source": {
-    "type": "window",              // "window" or "camera"
-    "window_hwnd": 0,              // Target window handle
-    "window_title": "",            // For display only
-    "window_region": {             // OCR crop region (set via region selector)
-      "left": 0, "top": 0,
-      "width": 0, "height": 0
+    "type": "window", // "window" or "camera"
+    "window_hwnd": 0, // Target window handle
+    "window_title": "", // For display only
+    "window_region": {
+      // OCR crop region (set via region selector)
+      "left": 0,
+      "top": 0,
+      "width": 0,
+      "height": 0,
     },
-    "camera_index": 0              // DirectShow device index
+    "camera_index": 0, // DirectShow device index
   },
   "server": {
-    "enabled": false,              // Send results to an external API
+    "enabled": false, // Send results to an external API
     "url": "http://localhost:3000/api/facecam",
     "method": "POST",
     "headers": {
       "Content-Type": "application/json",
-      "Authorization": "Bearer YOUR_API_KEY_HERE"
+      "Authorization": "Bearer YOUR_API_KEY_HERE",
     },
     "timeout": 5,
     "retry_count": 3,
-    "retry_delay": 0.5
+    "retry_delay": 0.5,
   },
   "ocr": {
     "language": "en",
-    "confidence_threshold": 0.6,   // Min OCR confidence (0.0–1.0)
-    "fuzzy_match_threshold": 70,   // Min match score (0–100)
-    "use_gpu": false
+    "confidence_threshold": 0.6, // Min OCR confidence (0.0–1.0)
+    "fuzzy_match_threshold": 70, // Min match score (0–100)
+    "use_gpu": false,
   },
   "capture": {
-    "interval_seconds": 0.1        // Capture frequency in seconds
-  }
+    "interval_seconds": 0.1, // Capture frequency in seconds
+  },
 }
 ```
 
@@ -313,33 +317,34 @@ FaceCam/
 
 ## Troubleshooting
 
-| Issue | Cause | Fix |
-|-------|-------|-----|
-| App opens and immediately closes | Missing `DirectML.dll` or models | Ensure `DirectML.dll` is next to the exe and `models/` folder exists with all 3 files |
-| "ONNX models not found" | Models not in expected location | Place `det.onnx`, `rec.onnx`, `en_dict.txt` in `models/` next to the exe |
-| "localhost refused to connect" | Frontend not bundled | Use `npm run tauri build`, not `cargo build --release` alone |
-| Virtual cameras not listed | MF doesn't see DirectShow-only devices | Already handled — DirectShow enumeration is the primary method |
-| Gray camera preview | Camera outputs NV12/I420 format | Already handled — YUV→RGB conversion in `capture.rs` |
-| `crash.log` appears | Startup panic | Read `crash.log` next to the exe for the error message |
-| App flashes on other PCs | Test binary was built instead of main app | Ensure `src/bin/` directory does not exist (no extra binary targets) |
+| Issue                            | Cause                                     | Fix                                                                                   |
+| -------------------------------- | ----------------------------------------- | ------------------------------------------------------------------------------------- |
+| App opens and immediately closes | Missing `DirectML.dll` or models          | Ensure `DirectML.dll` is next to the exe and `models/` folder exists with all 3 files |
+| "ONNX models not found"          | Models not in expected location           | Place `det.onnx`, `rec.onnx`, `en_dict.txt` in `models/` next to the exe              |
+| "localhost refused to connect"   | Frontend not bundled                      | Use `npm run tauri build`, not `cargo build --release` alone                          |
+| Virtual cameras not listed       | MF doesn't see DirectShow-only devices    | Already handled — DirectShow enumeration is the primary method                        |
+| Gray camera preview              | Camera outputs NV12/I420 format           | Already handled — YUV→RGB conversion in `capture.rs`                                  |
+| `crash.log` appears              | Startup panic                             | Read `crash.log` next to the exe for the error message                                |
+| App flashes on other PCs         | Test binary was built instead of main app | Ensure `src/bin/` directory does not exist (no extra binary targets)                  |
 
 ---
 
 ## npm Scripts Reference
 
-| Script | Description |
-|--------|-------------|
-| `npm run dev` | Start Vite dev server |
-| `npm run build` | Build frontend (TypeScript + Vite) |
-| `npm run tauri dev` | Development mode (frontend + Tauri window) |
-| `npm run tauri build` | Full release build + NSIS installer |
-| `npm run lint` | Run ESLint |
+| Script                | Description                                |
+| --------------------- | ------------------------------------------ |
+| `npm run dev`         | Start Vite dev server                      |
+| `npm run build`       | Build frontend (TypeScript + Vite)         |
+| `npm run tauri dev`   | Development mode (frontend + Tauri window) |
+| `npm run tauri build` | Full release build + NSIS installer        |
+| `npm run lint`        | Run ESLint                                 |
 
 ---
 
 ## Adding a New Tauri Command
 
 1. Define the function in `app/src-tauri/src/lib.rs`:
+
    ```rust
    #[tauri::command]
    async fn my_command(arg: String) -> Result<String, String> {
@@ -348,6 +353,7 @@ FaceCam/
    ```
 
 2. Register it in the `invoke_handler` array in `lib.rs` → `run()`:
+
    ```rust
    .invoke_handler(tauri::generate_handler![
        // ... existing commands

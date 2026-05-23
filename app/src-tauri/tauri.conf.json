@@ -1,8 +1,8 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Efinity FaceCam",
-  "version": "0.1.0",
-  "identifier": "com.themis.facecam",
+  "productName": "Efinity FaceCam Lan",
+  "version": "2.0.0",
+  "identifier": "com.themis.facecamlan",
   "build": {
     "frontendDist": "../dist",
     "devUrl": "http://localhost:5173",
@@ -14,7 +14,7 @@
     "withGlobalTauri": true,
     "windows": [
       {
-        "title": "Efinity FaceCam",
+        "title": "Efinity FaceCam Lan",
         "width": 1150,
         "height": 920,
         "minWidth": 950,

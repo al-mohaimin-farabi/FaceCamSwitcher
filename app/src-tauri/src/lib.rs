@@ -9,7 +9,9 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 use std::sync::{Arc, Mutex};
 use tauri::{AppHandle, Emitter, Manager};
-use tokio::time::{interval, Duration};
+use tokio::io::AsyncWriteExt;
+use tokio::net::TcpStream;
+use tokio::time::Duration;
 
 // ── State ────────────────────────────────────────────────────────────
 
@@ -94,6 +96,8 @@ struct VmixConfig {
     ip: String,
     #[serde(default = "default_vmix_port")]
     port: u16,
+    #[serde(default = "default_vmix_tcp_port")]
+    tcp_port: u16,
     #[serde(default = "default_vmix_layer")]
     layer: u32,
     /// vMix input names that are the "target sources" (e.g. "Gameplay", "OB 1").
@@ -104,6 +108,7 @@ struct VmixConfig {
 
 fn default_vmix_ip() -> String { "192.168.1.100".into() }
 fn default_vmix_port() -> u16 { 8088 }
+fn default_vmix_tcp_port() -> u16 { 8099 }
 fn default_vmix_layer() -> u32 { 7 }
 
 impl Default for VmixConfig {
@@ -111,6 +116,7 @@ impl Default for VmixConfig {
         VmixConfig {
             ip: default_vmix_ip(),
             port: default_vmix_port(),
+            tcp_port: default_vmix_tcp_port(),
             layer: default_vmix_layer(),
             target_sources: Vec::new(),
         }
@@ -149,7 +155,7 @@ struct AppConfig {
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
-const APP_DATA_SUBDIR: &str = "EfinityFaceCam";
+const APP_DATA_SUBDIR: &str = "EfinityFaceCamLan";
 
 fn get_app_data_dir() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA") {
@@ -175,18 +181,19 @@ fn ensure_default_config(dir: &PathBuf) {
   "vmix": {
     "ip": "192.168.1.100",
     "port": 8088,
+    "tcp_port": 8099,
     "layer": 7,
     "target_sources": []
   },
   "team_camera_map": {},
   "ocr": {
     "language": "en",
-    "confidence_threshold": 0.6,
-    "fuzzy_match_threshold": 80,
+    "confidence_threshold": 0.55,
+    "fuzzy_match_threshold": 75,
     "use_gpu": false
   },
   "capture": {
-    "interval_seconds": 0.1,
+    "interval_seconds": 0.05,
     "save_debug_screenshots": false,
     "debug_screenshot_dir": ""
   }
@@ -356,6 +363,27 @@ async fn call_vmix_set_layer(
         results.push(h.await.unwrap_or_else(|e| Err(format!("Task panicked: {e}"))));
     }
     results
+}
+
+/// Write a single SetLayer command over an existing TCP connection (fire-and-forget).
+async fn vmix_tcp_send_layer(
+    stream: &mut TcpStream,
+    layer: u32,
+    target_sources: &[String],
+    camera_input: Option<&str>,
+) -> Result<(), String> {
+    let value = match camera_input {
+        Some(cam) => format!("{},{}", layer, cam),
+        None => format!("{},None", layer),
+    };
+    for source in target_sources {
+        let cmd = format!(
+            "FUNCTION SetLayer Input={}&Value={}\r\n",
+            source, value
+        );
+        stream.write_all(cmd.as_bytes()).await.map_err(|e| format!("TCP write failed: {e}"))?;
+    }
+    Ok(())
 }
 
 fn urlencoded(s: &str) -> String {
@@ -754,17 +782,19 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
         }
     };
 
-    let capture_interval = config.capture.interval_seconds.max(0.1);
+    let capture_interval = config.capture.interval_seconds.max(0.01);
     let confidence_threshold = config.ocr.confidence_threshold as f32;
     let vmix = config.vmix.clone();
     let cam_map = config.team_camera_map.clone();
 
     let _ = app.emit("log", LogEvent { level: "info".into(), message: "OCR engine started (Rust native ONNX)".into() });
 
-    let mut ticker = interval(Duration::from_secs_f64(capture_interval));
+    let tcp_addr = format!("{}:{}", vmix.ip, vmix.tcp_port);
+    let mut tcp_stream: Option<TcpStream> = TcpStream::connect(&tcp_addr).await.ok();
+
+    let sleep_dur = Duration::from_secs_f64(capture_interval);
 
     while state.running.load(Ordering::SeqCst) && is_current(&state) {
-        ticker.tick().await;
 
         let region = &config.input_source.window_region;
         let img_result = if config.input_source.source_type == "window" {
@@ -799,15 +829,18 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
             }
         };
 
-        let preview_b64 = capture::image_to_base64_jpeg(&img).unwrap_or_default();
-        let preprocessed = capture::preprocess_for_ocr(&img);
-        let ocr_results = tokio::task::spawn_blocking(move || ocr::run_ocr(&preprocessed)).await;
+        let ocr_task = tokio::task::spawn_blocking(move || {
+            let b64 = capture::image_to_base64_jpeg(&img).unwrap_or_default();
+            let preprocessed = capture::preprocess_for_ocr(&img);
+            let results = ocr::run_ocr(&preprocessed);
+            (b64, results)
+        }).await;
 
-        let results = match ocr_results {
-            Ok(Ok(r)) => r,
-            Ok(Err(e)) => {
+        let (preview_b64, results) = match ocr_task {
+            Ok((b64, Ok(r))) => (b64, r),
+            Ok((b64, Err(e))) => {
                 let _ = app.emit("log", LogEvent { level: "error".into(), message: format!("OCR failed: {e}") });
-                send_preview(&app, &preview_b64, &[]);
+                send_preview(&app, &b64, &[]);
                 continue;
             }
             Err(e) => {
@@ -859,11 +892,38 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
                     });
 
                     if !vmix.target_sources.is_empty() {
-                        let results = call_vmix_set_layer(
-                            &vmix.ip, vmix.port, vmix.layer, &vmix.target_sources, Some(cam),
-                        ).await;
-                        let errors: Vec<_> = results.iter().filter_map(|r| r.as_ref().err()).collect();
-                        if errors.is_empty() {
+                        let tcp_ok = if let Some(ref mut stream) = tcp_stream {
+                            match vmix_tcp_send_layer(stream, vmix.layer, &vmix.target_sources, Some(cam)).await {
+                                Ok(()) => true,
+                                Err(_) => {
+                                    // Reconnect once
+                                    tcp_stream = TcpStream::connect(&tcp_addr).await.ok();
+                                    if let Some(ref mut stream) = tcp_stream {
+                                        vmix_tcp_send_layer(stream, vmix.layer, &vmix.target_sources, Some(cam)).await.is_ok()
+                                    } else {
+                                        false
+                                    }
+                                }
+                            }
+                        } else {
+                            tcp_stream = TcpStream::connect(&tcp_addr).await.ok();
+                            if let Some(ref mut stream) = tcp_stream {
+                                vmix_tcp_send_layer(stream, vmix.layer, &vmix.target_sources, Some(cam)).await.is_ok()
+                            } else {
+                                false
+                            }
+                        };
+
+                        let vmix_success = if tcp_ok {
+                            true
+                        } else {
+                            let results = call_vmix_set_layer(
+                                &vmix.ip, vmix.port, vmix.layer, &vmix.target_sources, Some(cam),
+                            ).await;
+                            results.iter().all(|r| r.is_ok())
+                        };
+
+                        if vmix_success {
                             let _ = app.emit("log", LogEvent {
                                 level: "info".into(),
                                 message: format!("[vMix] {} → {} (Layer {})", team_tag, cam, vmix.layer),
@@ -875,9 +935,7 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
                                 "cleared": false
                             }));
                         } else {
-                            for e in &errors {
-                                let _ = app.emit("log", LogEvent { level: "error".into(), message: format!("[vMix] {e}") });
-                            }
+                            let _ = app.emit("log", LogEvent { level: "error".into(), message: "[vMix] All send attempts failed".into() });
                         }
                     } else {
                         let _ = app.emit("log", LogEvent {
@@ -906,6 +964,7 @@ async fn run_ocr_loop(app: AppHandle, state: Arc<OcrState>, my_gen: u64) {
                 }
             }
         }
+        tokio::time::sleep(sleep_dur).await;
     }
 
     if is_current(&state) {

@@ -32,7 +32,13 @@
 }
 
 body {
-  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, -apple-system, sans-serif;
+  font-family:
+    "Inter",
+    "Segoe UI Variable Text",
+    "Segoe UI",
+    system-ui,
+    -apple-system,
+    sans-serif;
   background: var(--bg-primary);
   color: var(--text-primary);
   overflow: hidden;
@@ -76,11 +82,15 @@ body {
 
 /* ─── Animations ───────────────────────────────────────────────── */
 @keyframes spin {
-  to { transform: rotate(360deg); }
+  to {
+    transform: rotate(360deg);
+  }
 }
 
 /* stagger-children: instant visibility */
-.stagger-children > * { animation: none; }
+.stagger-children > * {
+  animation: none;
+}
 
 /* ─── Status Dot ───────────────────────────────────────────────── */
 .status-dot {
@@ -117,7 +127,8 @@ body {
   font-size: 13px;
   cursor: pointer;
   border: 1px solid transparent;
-  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-family:
+    "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
 .btn-primary {
   background: var(--accent);
@@ -192,7 +203,8 @@ body {
   gap: 10px;
   padding: 6px 10px;
   border-radius: 6px;
-  font-family: "Cascadia Code", "JetBrains Mono", "Consolas", "Courier New", monospace;
+  font-family:
+    "Cascadia Code", "JetBrains Mono", "Consolas", "Courier New", monospace;
   font-size: 12px;
   line-height: 1.6;
 }
@@ -204,10 +216,18 @@ body {
   white-space: nowrap;
   flex-shrink: 0;
 }
-.log-entry.info .msg    { color: var(--text-secondary); }
-.log-entry.success .msg { color: var(--green); }
-.log-entry.warning .msg { color: var(--yellow); }
-.log-entry.error .msg   { color: var(--red); }
+.log-entry.info .msg {
+  color: var(--text-secondary);
+}
+.log-entry.success .msg {
+  color: var(--green);
+}
+.log-entry.warning .msg {
+  color: var(--yellow);
+}
+.log-entry.error .msg {
+  color: var(--red);
+}
 
 /* ─── Player Badge ─────────────────────────────────────────────── */
 .player-badge {
@@ -277,7 +297,8 @@ body {
   text-align: center;
   border: none;
   background: transparent;
-  font-family: "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
+  font-family:
+    "Inter", "Segoe UI Variable Text", "Segoe UI", system-ui, sans-serif;
 }
 .tab-item:hover {
   color: var(--text-secondary);

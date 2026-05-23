@@ -1,0 +1,12 @@
+{
+  "permissions": {
+    "allow": [
+      "Skill(architect)",
+      "Skill(architect:*)",
+      "Bash(mkdir -p \"d:/E-Cube-Projects/FaceCam2.0/Efinity-FaceCam/.claude/plans\")"
+    ],
+    "additionalDirectories": [
+      "d:\\E-Cube-Projects\\FaceCam2.0\\Efinity-FaceCam\\.claude\\plans"
+    ]
+  }
+}

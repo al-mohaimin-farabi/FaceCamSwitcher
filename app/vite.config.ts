@@ -21,9 +21,7 @@ export default defineConfig(() => ({
     port: 5173,
     strictPort: true,
     host: host || false,
-    hmr: host
-      ? { protocol: "ws", host, port: 5174 }
-      : undefined,
+    hmr: host ? { protocol: "ws", host, port: 5174 } : undefined,
     watch: {
       ignored: ["**/src-tauri/**"],
     },
@@ -38,15 +36,15 @@ export default defineConfig(() => ({
       output: {
         // Split vendor libs from app code so the browser can cache them separately
         manualChunks: {
-          "vendor-react":  ["react", "react-dom"],
-          "vendor-redux":  ["@reduxjs/toolkit", "react-redux"],
-          "vendor-tauri":  ["@tauri-apps/api"],
+          "vendor-react": ["react", "react-dom"],
+          "vendor-redux": ["@reduxjs/toolkit", "react-redux"],
+          "vendor-tauri": ["@tauri-apps/api"],
           "vendor-lucide": ["lucide-react"],
         },
         // Deterministic filenames in the Tauri bundle
-        entryFileNames:   "assets/[name]-[hash].js",
-        chunkFileNames:   "assets/[name]-[hash].js",
-        assetFileNames:   "assets/[name]-[hash][extname]",
+        entryFileNames: "assets/[name]-[hash].js",
+        chunkFileNames: "assets/[name]-[hash].js",
+        assetFileNames: "assets/[name]-[hash][extname]",
       },
     },
     // Report what's large

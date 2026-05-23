@@ -1,6 +1,15 @@
 import { useState, useEffect } from "react";
 import { invoke } from "@tauri-apps/api/core";
-import { Users, Search, RefreshCw, X, Filter, Pencil, Check, Trash2 } from "lucide-react";
+import {
+  Users,
+  Search,
+  RefreshCw,
+  X,
+  Filter,
+  Pencil,
+  Check,
+  Trash2,
+} from "lucide-react";
 
 interface Message {
   text: string;
@@ -28,7 +37,9 @@ export default function PlayerNames() {
   };
 
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  useEffect(() => { loadPlayers(); }, []);
+  useEffect(() => {
+    loadPlayers();
+  }, []);
 
   const showMessage = (text: string, type: "success" | "error") => {
     setMessage({ text, type });
@@ -119,14 +130,16 @@ export default function PlayerNames() {
         display: "flex",
         flexDirection: "column",
         gap: 20,
-      }}>
+      }}
+    >
       {/* ── Top Bar ─────────────────────────── */}
       <div
         style={{
           display: "flex",
           justifyContent: "space-between",
           alignItems: "center",
-        }}>
+        }}
+      >
         <div>
           <h2
             style={{
@@ -134,7 +147,8 @@ export default function PlayerNames() {
               fontWeight: 800,
               color: "var(--text-bright)",
               letterSpacing: "-0.02em",
-            }}>
+            }}
+          >
             Player Management
           </h2>
           <p style={{ fontSize: 13, color: "var(--text-muted)", marginTop: 4 }}>
@@ -151,14 +165,16 @@ export default function PlayerNames() {
               display: "flex",
               alignItems: "center",
               gap: 8,
-            }}>
+            }}
+          >
             <Users size={14} style={{ color: "var(--text-muted)" }} />
             <span
               style={{
                 fontSize: 13,
                 fontWeight: 700,
                 color: "var(--text-bright)",
-              }}>
+              }}
+            >
               {players.length}
             </span>
             <span style={{ fontSize: 12, color: "var(--text-muted)" }}>
@@ -175,7 +191,8 @@ export default function PlayerNames() {
               gap: 8,
               padding: "0 12px",
             }}
-            title="Reload from local file">
+            title="Reload from local file"
+          >
             <RefreshCw size={14} className={isLoading ? "animate-spin" : ""} />
             <span style={{ fontSize: 11, fontWeight: 600 }}>Reload</span>
           </button>
@@ -190,9 +207,11 @@ export default function PlayerNames() {
               gap: 8,
               padding: "0 12px",
               color: players.length === 0 ? undefined : "#ef4444",
-              borderColor: players.length === 0 ? undefined : "rgba(239,68,68,0.3)",
+              borderColor:
+                players.length === 0 ? undefined : "rgba(239,68,68,0.3)",
             }}
-            title="Remove all players from the database">
+            title="Remove all players from the database"
+          >
             <Trash2 size={14} />
             <span style={{ fontSize: 11, fontWeight: 600 }}>Clear All</span>
           </button>
@@ -207,10 +226,14 @@ export default function PlayerNames() {
             borderRadius: 8,
             fontSize: 12,
             fontWeight: 600,
-            background: message.type === "success" ? "rgba(34,197,94,0.15)" : "rgba(239,68,68,0.15)",
+            background:
+              message.type === "success"
+                ? "rgba(34,197,94,0.15)"
+                : "rgba(239,68,68,0.15)",
             color: message.type === "success" ? "#22c55e" : "#ef4444",
             border: `1px solid ${message.type === "success" ? "rgba(34,197,94,0.3)" : "rgba(239,68,68,0.3)"}`,
-          }}>
+          }}
+        >
           {message.text}
         </div>
       )}
@@ -223,13 +246,15 @@ export default function PlayerNames() {
           display: "flex",
           flexDirection: "column",
           gap: 16,
-        }}>
+        }}
+      >
         <div
           style={{
             display: "flex",
             justifyContent: "space-between",
             alignItems: "center",
-          }}>
+          }}
+        >
           <div className="section-header" style={{ marginBottom: 0 }}>
             <Filter size={14} className="icon" /> Player Database
           </div>
@@ -272,7 +297,8 @@ export default function PlayerNames() {
                 marginTop: 12,
                 color: "var(--text-muted)",
                 fontSize: 13,
-              }}>
+              }}
+            >
               Loading...
             </p>
           </div>
@@ -283,7 +309,8 @@ export default function PlayerNames() {
               padding: "40px 0",
               background: "rgba(255,255,255,0.02)",
               borderRadius: 12,
-            }}>
+            }}
+          >
             <Users
               size={32}
               style={{
@@ -297,15 +324,13 @@ export default function PlayerNames() {
                 marginTop: 12,
                 color: "var(--text-muted)",
                 fontSize: 13,
-              }}>
-              {searchQuery
-                ? "No matching players found"
-                : "Database is empty"}
+              }}
+            >
+              {searchQuery ? "No matching players found" : "Database is empty"}
             </p>
           </div>
         ) : (
-          <div
-            style={{ display: "flex", flexDirection: "column", gap: 12 }}>
+          <div style={{ display: "flex", flexDirection: "column", gap: 12 }}>
             {Object.entries(groupedPlayers)
               .sort(([a], [b]) => a.localeCompare(b))
               .map(([team, names]) => (
@@ -316,7 +341,8 @@ export default function PlayerNames() {
                     borderRadius: 12,
                     overflow: "hidden",
                     background: "rgba(0,0,0,0.1)",
-                  }}>
+                  }}
+                >
                   <div
                     style={{
                       background: "rgba(255,255,255,0.03)",
@@ -325,18 +351,19 @@ export default function PlayerNames() {
                       display: "flex",
                       justifyContent: "space-between",
                       alignItems: "center",
-                    }}>
+                    }}
+                  >
                     <span
                       style={{
                         fontSize: 12,
                         fontWeight: 700,
                         color: "var(--accent)",
                         letterSpacing: "0.05em",
-                      }}>
+                      }}
+                    >
                       {team}
                     </span>
-                    <span
-                      style={{ fontSize: 11, color: "var(--text-muted)" }}>
+                    <span style={{ fontSize: 11, color: "var(--text-muted)" }}>
                       {names.length} player{names.length !== 1 ? "s" : ""}
                     </span>
                   </div>
@@ -346,7 +373,8 @@ export default function PlayerNames() {
                       display: "flex",
                       flexWrap: "wrap",
                       gap: 6,
-                    }}>
+                    }}
+                  >
                     {names.map((name) => (
                       <div key={name} className="player-badge group">
                         {editingPlayer === name ? (
@@ -374,8 +402,12 @@ export default function PlayerNames() {
                             <button
                               className="remove-btn"
                               onClick={() => handleRenamePlayer(name)}
-                              style={{ color: "#22c55e", background: "rgba(34,197,94,0.15)" }}
-                              title="Save">
+                              style={{
+                                color: "#22c55e",
+                                background: "rgba(34,197,94,0.15)",
+                              }}
+                              title="Save"
+                            >
                               <Check size={12} />
                             </button>
                           </>
@@ -388,13 +420,18 @@ export default function PlayerNames() {
                                 setEditingPlayer(name);
                                 setEditValue(name);
                               }}
-                              style={{ color: "#94a3b8", background: "rgba(148,163,184,0.15)" }}
-                              title="Edit">
+                              style={{
+                                color: "#94a3b8",
+                                background: "rgba(148,163,184,0.15)",
+                              }}
+                              title="Edit"
+                            >
                               <Pencil size={10} />
                             </button>
                             <button
                               className="remove-btn"
-                              onClick={() => handleRemovePlayer(name)}>
+                              onClick={() => handleRemovePlayer(name)}
+                            >
                               <X size={12} />
                             </button>
                           </>

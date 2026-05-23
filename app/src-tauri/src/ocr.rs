@@ -137,25 +137,24 @@ fn detect_text(img: &RgbImage) -> Result<Vec<[f32; 4]>, String> {
     let mut session = session_mutex.lock().map_err(|e| format!("Det session lock failed: {e}"))?;
 
     let (orig_w, orig_h) = (img.width(), img.height());
-    let max_side = 960u32;
+    let max_side = 640u32;
     let ratio = (max_side as f32 / orig_w.max(orig_h) as f32).min(1.0);
     let new_w = ((orig_w as f32 * ratio) as u32 / 32 * 32).max(32);
     let new_h = ((orig_h as f32 * ratio) as u32 / 32 * 32).max(32);
 
     let resized =
-        image::imageops::resize(img, new_w, new_h, image::imageops::FilterType::Triangle);
+        image::imageops::resize(img, new_w, new_h, image::imageops::FilterType::Nearest);
 
     // Normalize with ImageNet mean/std
     let mean = [0.485f32, 0.456, 0.406];
     let std_dev = [0.229f32, 0.224, 0.225];
     let mut input = Array4::<f32>::zeros((1, 3, new_h as usize, new_w as usize));
-
-    for y in 0..new_h as usize {
-        for x in 0..new_w as usize {
-            let pixel = resized.get_pixel(x as u32, y as u32);
-            for c in 0..3 {
-                input[[0, c, y, x]] = (pixel[c] as f32 / 255.0 - mean[c]) / std_dev[c];
-            }
+    let raw = resized.as_raw();
+    for (idx, chunk) in raw.chunks(3).enumerate() {
+        let x = idx % new_w as usize;
+        let y = idx / new_w as usize;
+        for c in 0..3usize {
+            input[[0, c, y, x]] = (chunk[c] as f32 / 255.0 - mean[c]) / std_dev[c];
         }
     }
 
@@ -271,16 +270,16 @@ fn recognize_text(img: &RgbImage) -> Result<TextResult, String> {
     let ratio = target_h as f32 / img.height().max(1) as f32;
     let target_w = ((img.width() as f32 * ratio) as u32).max(48);
     let resized =
-        image::imageops::resize(img, target_w, target_h, image::imageops::FilterType::Triangle);
+        image::imageops::resize(img, target_w, target_h, image::imageops::FilterType::Nearest);
 
     // Normalize: (pixel / 255.0 - 0.5) / 0.5 → maps to [-1, 1]
     let mut input = Array4::<f32>::zeros((1, 3, target_h as usize, target_w as usize));
-    for y in 0..target_h as usize {
-        for x in 0..target_w as usize {
-            let pixel = resized.get_pixel(x as u32, y as u32);
-            for c in 0..3 {
-                input[[0, c, y, x]] = (pixel[c] as f32 / 255.0 - 0.5) / 0.5;
-            }
+    let raw = resized.as_raw();
+    for (idx, chunk) in raw.chunks(3).enumerate() {
+        let x = idx % target_w as usize;
+        let y = idx / target_w as usize;
+        for c in 0..3usize {
+            input[[0, c, y, x]] = (chunk[c] as f32 / 255.0 - 0.5) / 0.5;
         }
     }
 
