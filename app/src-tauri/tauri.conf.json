@@ -1,6 +1,6 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
-  "productName": "Efinity FaceCam Lan",
+  "productName": "EfinityFaceCamLan",
   "version": "2.0.0",
   "identifier": "com.themis.facecamlan",
   "build": {
