@@ -1,154 +1,90 @@
-import { useState, useEffect } from "react";
+import { useState } from "react";
+import {
+  LayoutDashboard,
+  Users,
+  Radio,
+  FolderCog,
+  Tv,
+  IdCard,
+  Settings as SettingsIcon,
+} from "lucide-react";
 import Dashboard from "./pages/Dashboard";
-import PlayerNames from "./pages/PlayerNames";
-import Settings from "./pages/Settings";
-import { LayoutDashboard, Users, Settings as SettingsIcon } from "lucide-react";
-import { useDispatch } from "react-redux";
-import { listen } from "@tauri-apps/api/event";
-import { addLog, incrementScans, incrementDetections, incrementMatches, setPreviewData, setIsRunning, type PreviewData } from "./store/appSlice";
+import Observers from "./pages/Observers";
+import LiveFeed from "./pages/LiveFeed";
+import Sources from "./pages/Sources";
+import TeamInfo from "./pages/TeamInfo";
+import VmixPanel from "./pages/VmixPanel";
+import AppSettingsPage from "./pages/AppSettingsPage";
+import { useBootstrap } from "./lib/useBootstrap";
+import { useAppSelector } from "./store/hooks";
 
-type Page = "dashboard" | "players" | "settings";
+type Page = "dashboard" | "observers" | "live" | "sources" | "teams" | "vmix" | "settings";
+
+const NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
+  { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={17} /> },
+  { id: "observers", label: "Observers", icon: <Users size={17} /> },
+  { id: "live", label: "Live Feed", icon: <Radio size={17} /> },
+  { id: "sources", label: "Debugger Source", icon: <FolderCog size={17} /> },
+  { id: "teams", label: "Team Info", icon: <IdCard size={17} /> },
+  { id: "vmix", label: "vMix Panel", icon: <Tv size={17} /> },
+  { id: "settings", label: "Settings", icon: <SettingsIcon size={17} /> },
+];
 
 function App() {
-  const [currentPage, setCurrentPage] = useState<Page>("dashboard");
-  const dispatch = useDispatch();
-
-  useEffect(() => {
-    // Global Tauri event listeners mapped to Redux
-    const unlistenLog = listen<{ level: string; message: string }>("log", (event) => {
-      if (event.payload.level === "preview") {
-        try {
-          const data: PreviewData = JSON.parse(event.payload.message);
-          dispatch(setPreviewData(data));
-          // Update stats from actual detection data
-          dispatch(incrementScans());
-          if (data.detections && data.detections.length > 0) {
-            dispatch(incrementDetections(data.detections.length));
-            const matchCount = data.detections.filter((d) => d.matched_name).length;
-            if (matchCount > 0) {
-              dispatch(incrementMatches(matchCount));
-            }
-          }
-        } catch {}
-        return;
-      }
-      const time = new Date().toLocaleTimeString("en-US", { hour12: false });
-      dispatch(addLog({ time, level: event.payload.level, message: event.payload.message }));
-    });
-
-    const unlistenStop = listen("ocr_stopped", () => {
-      dispatch(setIsRunning(false));
-    });
-
-    return () => {
-      unlistenLog.then((fn) => fn());
-      unlistenStop.then((fn) => fn());
-    };
-  }, [dispatch]);
+  const [page, setPage] = useState<Page>("dashboard");
+  useBootstrap();
+  const version = useAppSelector((s) => s.observer.version);
 
   return (
-    <div className="gradient-bg" style={{ height: "100vh", display: "flex", flexDirection: "column" }}>
-      {/* ── Header ──────────────────────────────── */}
-      <header
-        style={{
-          display: "flex",
-          alignItems: "center",
-          padding: "12px 24px",
-          background: "var(--bg-secondary)",
-          borderBottom: "1px solid var(--border)",
-          gap: "14px",
-          position: "relative",
-          zIndex: 10,
-        }}
-      >
-        {/* Logo + Title */}
-        <div style={{ display: "flex", alignItems: "center", gap: "12px" }}>
+    <div className="app-shell gradient-bg">
+      {/* ── Sidebar ─────────────────────────────── */}
+      <aside className="sidebar">
+        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "6px 8px 18px" }}>
           <div
             style={{
-              width: 40,
-              height: 40,
-              borderRadius: 12,
-              background: "#080B14",
-              border: "1px solid rgba(255, 255, 255, 0.08)",
-              display: "flex",
-              alignItems: "center",
-              justifyContent: "center",
-              boxShadow: "0 4px 12px rgba(0, 0, 0, 0.4)",
-              overflow: "hidden",
+              width: 38, height: 38, borderRadius: 11, background: "#080B14",
+              border: "1px solid rgba(255,255,255,0.08)", display: "flex",
+              alignItems: "center", justifyContent: "center", overflow: "hidden",
             }}
           >
-            <img src="/logo.svg" alt="Logo" style={{ width: 28, height: 28 }} />
+            <img src="/logo.svg" alt="Logo" style={{ width: 24, height: 24 }} />
           </div>
           <div>
-            <h1
-              style={{
-                fontSize: 18,
-                fontWeight: 800,
-                background: "linear-gradient(135deg, #60a5fa, #a78bfa)",
-                WebkitBackgroundClip: "text",
-                WebkitTextFillColor: "transparent",
-                letterSpacing: "-0.02em",
-                lineHeight: 1.2,
-              }}
-            >
-              Efinity FaceCam
-            </h1>
-
+            <div style={{ fontSize: 15, fontWeight: 800, background: "linear-gradient(135deg,#60a5fa,#a78bfa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", lineHeight: 1.1 }}>
+              FaceCam
+            </div>
+            <div style={{ fontSize: 10.5, color: "var(--text-muted)", fontWeight: 500 }}>PCOB Observer</div>
           </div>
         </div>
 
-        {/* Navigation Tabs */}
-        <div className="tab-bar" style={{ marginLeft: "auto", padding: '4px' }}>
-          <button
-            className={`tab-item ${currentPage === "dashboard" ? "active" : ""}`}
-            onClick={() => setCurrentPage("dashboard")}
-            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-          >
-            <LayoutDashboard size={16} />
-            Dashboard
-          </button>
-          <button
-            className={`tab-item ${currentPage === "players" ? "active" : ""}`}
-            onClick={() => setCurrentPage("players")}
-            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-          >
-            <Users size={16} />
-            Players
-          </button>
-          <button
-            className={`tab-item ${currentPage === "settings" ? "active" : ""}`}
-            onClick={() => setCurrentPage("settings")}
-            style={{ display: 'flex', alignItems: 'center', gap: '8px' }}
-          >
-            <SettingsIcon size={16} />
-            Settings
-          </button>
+        <nav style={{ display: "flex", flexDirection: "column", gap: 3 }}>
+          {NAV.map((n) => (
+            <button
+              key={n.id}
+              className={`nav-item ${page === n.id ? "active" : ""}`}
+              onClick={() => setPage(n.id)}
+            >
+              <span className="nav-icon" style={{ display: "flex" }}>{n.icon}</span>
+              {n.label}
+            </button>
+          ))}
+        </nav>
+
+        <div style={{ marginTop: "auto", padding: "12px 10px 4px", fontSize: 11, color: "var(--text-muted)" }}>
+          v{version} · by themisuwu
         </div>
-      </header>
+      </aside>
 
-      {/* ── Page Content ────────────────────────── */}
-      <main style={{ flex: 1, overflow: "auto", position: "relative" }}>
-        {currentPage === "dashboard" && <Dashboard />}
-        {currentPage === "players" && <PlayerNames />}
-        {currentPage === "settings" && <Settings />}
+      {/* ── Content ─────────────────────────────── */}
+      <main style={{ flex: 1, overflow: "auto" }}>
+        {page === "dashboard" && <Dashboard />}
+        {page === "observers" && <Observers />}
+        {page === "live" && <LiveFeed />}
+        {page === "sources" && <Sources />}
+        {page === "teams" && <TeamInfo />}
+        {page === "vmix" && <VmixPanel />}
+        {page === "settings" && <AppSettingsPage />}
       </main>
-
-      {/* ── Footer ──────────────────────────────── */}
-      <footer
-        style={{
-          padding: "6px 20px",
-          background: "var(--bg-secondary)",
-          borderTop: "1px solid var(--border)",
-          display: "flex",
-          justifyContent: "space-between",
-          alignItems: "center",
-        }}
-      >
-        <span style={{ fontSize: 11, color: "var(--text-muted)", fontWeight: 500 }}>
-          Efinity FaceCam v1.0 • Developed by themisuwu
-        </span>
-
-      </footer>
     </div>
   );
 }

@@ -1,0 +1,32 @@
+[package]
+name = "facecam-observer"
+version = "0.2.0"
+description = "FaceCam Observer — streams Free Fire debugger data to the FaceCam controller"
+authors = ["themisuwu"]
+edition = "2021"
+
+[lib]
+name = "observer_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-fs = "2"
+tauri-plugin-dialog = "2"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+tokio = { version = "1", features = ["rt", "rt-multi-thread", "macros", "net", "time", "sync"] }
+tokio-tungstenite = "0.24"
+futures-util = "0.3"
+
+# Debugger engine (shared with the main app)
+notify = "6"
+chrono = { version = "0.4", features = ["serde"] }
+dirs = "5"
+regex = "1"
+once_cell = "1"
+getrandom = "0.2"
+if-addrs = "0.13"

@@ -1,0 +1,10 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(cargo --version)",
+      "Bash(npm install *)",
+      "PowerShell(winget install --id Rustlang.Rustup -e --accept-source-agreements --accept-package-agreements --disable-interactivity 2>&1)",
+      "PowerShell($rustup = \"$env:USERPROFILE\\\\.cargo\\\\bin\\\\rustup.exe\"; & $rustup show 2>&1 | Select-Object -First 10; Write-Output \"---link.exe---\"; $link = Get-Command link.exe -ErrorAction SilentlyContinue; if \\($link\\) { $link.Source } else { \"link.exe NOT on PATH\" }; Write-Output \"---VS---\"; Test-Path \"${env:ProgramFiles\\(x86\\)}\\\\Microsoft Visual Studio\\\\Installer\\\\vswhere.exe\")"
+    ]
+  }
+}
