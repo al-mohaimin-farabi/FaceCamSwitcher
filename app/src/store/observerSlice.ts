@@ -2,10 +2,10 @@ import { createSlice, type PayloadAction } from "@reduxjs/toolkit";
 import type {
   AppSettings,
   FolderValidation,
+  NetworkSyncLogEntry,
   ObserverConfig,
   ObserverRuntimeState,
   ObserverUpdate,
-  VmixLogEntry,
 } from "../lib/debugger/types";
 
 interface ObserverState {
@@ -16,8 +16,8 @@ interface ObserverState {
   folderValidation: FolderValidation | null;
   version: string;
   loaded: boolean;
-  vmixConnected: boolean;
-  vmixLog: VmixLogEntry[];
+  networkSyncConnected: boolean;
+  networkSyncLog: NetworkSyncLogEntry[];
 }
 
 const initialState: ObserverState = {
@@ -27,8 +27,8 @@ const initialState: ObserverState = {
   folderValidation: null,
   version: "—",
   loaded: false,
-  vmixConnected: false,
-  vmixLog: [],
+  networkSyncConnected: false,
+  networkSyncLog: [],
 };
 
 export const observerSlice = createSlice({
@@ -63,15 +63,15 @@ export const observerSlice = createSlice({
     setVersion: (state, action: PayloadAction<string>) => {
       state.version = action.payload;
     },
-    setVmixConnected: (state, action: PayloadAction<boolean>) => {
-      state.vmixConnected = action.payload;
+    setNetworkSyncConnected: (state, action: PayloadAction<boolean>) => {
+      state.networkSyncConnected = action.payload;
     },
-    addVmixLog: (state, action: PayloadAction<VmixLogEntry>) => {
-      state.vmixLog.push(action.payload);
-      if (state.vmixLog.length > 200) state.vmixLog.shift();
+    addNetworkSyncLog: (state, action: PayloadAction<NetworkSyncLogEntry>) => {
+      state.networkSyncLog.push(action.payload);
+      if (state.networkSyncLog.length > 200) state.networkSyncLog.shift();
     },
-    clearVmixLog: (state) => {
-      state.vmixLog = [];
+    clearNetworkSyncLog: (state) => {
+      state.networkSyncLog = [];
     },
   },
 });
@@ -83,9 +83,9 @@ export const {
   removeRuntime,
   setFolderValidation,
   setVersion,
-  setVmixConnected,
-  addVmixLog,
-  clearVmixLog,
+  setNetworkSyncConnected,
+  addNetworkSyncLog,
+  clearNetworkSyncLog,
 } = observerSlice.actions;
 
 export default observerSlice.reducer;

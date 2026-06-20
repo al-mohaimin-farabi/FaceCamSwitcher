@@ -10,11 +10,7 @@ export type CurrentObserverState = {
   updatedAt: string;
 };
 
-export type ObserverConnectionType =
-  | "local"
-  | "network_share"
-  | "remote_agent"
-  | "cloud_relay";
+export type ObserverConnectionType = "local";
 
 export type ObserverConfig = {
   id: string;
@@ -22,10 +18,6 @@ export type ObserverConfig = {
   type: ObserverConnectionType;
   enabled: boolean;
   localDebuggerPath?: string;
-  networkSharePath?: string;
-  remoteHost?: string;
-  remotePort?: number;
-  authToken?: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -59,33 +51,6 @@ export type UiPreferences = {
   compactCards: boolean;
 };
 
-export type VmixSendMode = "uid" | "name" | "disabled";
-
-export type ObserverVmixConfig = {
-  observerId: string;
-  sendMode: VmixSendMode;
-  sourceName: string;
-  layer: number;
-};
-
-export type VmixConfig = {
-  ip: string;
-  port: number;
-  observers: ObserverVmixConfig[];
-};
-
-export type VmixStatus = {
-  connected: boolean;
-  ip: string;
-  port: number;
-};
-
-export type VmixLogEntry = {
-  time: string;
-  level: "info" | "success" | "error";
-  message: string;
-};
-
 export type PlayerRole = "main" | "sub";
 
 export type TeamPlayer = {
@@ -108,13 +73,27 @@ export type Team = {
   players: TeamPlayer[];
 };
 
+export type NetworkSyncConfig = {
+  enabled: boolean;
+  apiBaseUrl: string;
+  socketUrl: string;
+  tournamentId: string;
+  secretKey: string;
+};
+
+export type NetworkSyncLogEntry = {
+  time: string;
+  level: "info" | "success" | "error";
+  message: string;
+};
+
 export type AppSettings = {
   debuggerFolder?: string;
   observers: ObserverConfig[];
   lastSelectedObserver?: string;
   debugLogging: boolean;
   ui: UiPreferences;
-  vmix: VmixConfig;
+  networkSync: NetworkSyncConfig;
   teams: Team[];
 };
 
@@ -132,20 +111,8 @@ export type DetectionResult = {
   candidates: string[];
 };
 
-export type DiscoveredAgent = {
-  agentId: string;
-  machineName: string;
-  host: string;
-  wsPort: number;
-  token: string | null;
-  status: string | null;
-};
-
 export const CONNECTION_TYPE_LABELS: Record<ObserverConnectionType, string> = {
   local: "Local PC",
-  network_share: "Network Share",
-  remote_agent: "Remote Agent",
-  cloud_relay: "Cloud Relay",
 };
 
 export const STATUS_LABELS: Record<ObserverStatus, string> = {

@@ -160,7 +160,7 @@ export default function TeamInfo() {
         <div>
           <div className="page-title">Team Info</div>
           <div className="page-subtitle">
-            Per-tournament teams — 4 main + 1 substitute. Resolves detected UIDs to players for vMix routing.
+            Per-tournament teams — 4 main + 1 substitute. Resolves detected UIDs to players for Network Sync.
           </div>
         </div>
         <div style={{ display: "flex", gap: 10 }}>

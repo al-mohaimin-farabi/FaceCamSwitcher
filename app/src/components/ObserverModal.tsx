@@ -1,14 +1,6 @@
 import { useState } from "react";
-import { X } from "lucide-react";
-import type { ObserverConfig, ObserverConnectionType } from "../lib/debugger/types";
-import { CONNECTION_TYPE_LABELS } from "../lib/debugger/types";
-
-const TYPES: ObserverConnectionType[] = [
-  "local",
-  "network_share",
-  "remote_agent",
-  "cloud_relay",
-];
+import { X, Check } from "lucide-react";
+import type { ObserverConfig } from "../lib/debugger/types";
 
 function emptyObserver(): ObserverConfig {
   const now = new Date().toISOString();
@@ -55,8 +47,6 @@ export default function ObserverModal({
     }
   };
 
-  const isRemote = draft.type === "remote_agent" || draft.type === "cloud_relay";
-
   return (
     <div className="modal-overlay" onClick={onClose}>
       <div className="modal" onClick={(e) => e.stopPropagation()}>
@@ -78,76 +68,14 @@ export default function ObserverModal({
         </div>
 
         <div className="field">
-          <label className="field-label">Connection Type</label>
-          <select
-            className="select"
-            value={draft.type}
-            onChange={(e) => set({ type: e.target.value as ObserverConnectionType })}
-          >
-            {TYPES.map((t) => (
-              <option key={t} value={t}>{CONNECTION_TYPE_LABELS[t]}</option>
-            ))}
-          </select>
+          <label className="field-label">Local Debugger Path (optional — defaults to global)</label>
+          <input
+            className="input"
+            placeholder="Leave blank to use the global debugger folder"
+            value={draft.localDebuggerPath ?? ""}
+            onChange={(e) => set({ localDebuggerPath: e.target.value || undefined })}
+          />
         </div>
-
-        {draft.type === "local" && (
-          <div className="field">
-            <label className="field-label">Local Debugger Path (optional — defaults to global)</label>
-            <input
-              className="input"
-              placeholder="Leave blank to use the global debugger folder"
-              value={draft.localDebuggerPath ?? ""}
-              onChange={(e) => set({ localDebuggerPath: e.target.value || undefined })}
-            />
-          </div>
-        )}
-
-        {draft.type === "network_share" && (
-          <div className="field">
-            <label className="field-label">Network Share Path</label>
-            <input
-              className="input"
-              placeholder="\\\\Observer-PC-01\\Debugger"
-              value={draft.networkSharePath ?? ""}
-              onChange={(e) => set({ networkSharePath: e.target.value || undefined })}
-            />
-          </div>
-        )}
-
-        {isRemote && (
-          <>
-            <div style={{ display: "flex", gap: 12 }}>
-              <div className="field" style={{ flex: 2 }}>
-                <label className="field-label">Remote Host / IP</label>
-                <input
-                  className="input"
-                  placeholder="192.168.1.25"
-                  value={draft.remoteHost ?? ""}
-                  onChange={(e) => set({ remoteHost: e.target.value || undefined })}
-                />
-              </div>
-              <div className="field" style={{ flex: 1 }}>
-                <label className="field-label">Port</label>
-                <input
-                  className="input"
-                  type="number"
-                  placeholder="8787"
-                  value={draft.remotePort ?? ""}
-                  onChange={(e) => set({ remotePort: Number(e.target.value) || undefined })}
-                />
-              </div>
-            </div>
-            <div className="field">
-              <label className="field-label">Auth / Pairing Token</label>
-              <input
-                className="input"
-                placeholder="Token configured on the remote agent"
-                value={draft.authToken ?? ""}
-                onChange={(e) => set({ authToken: e.target.value || undefined })}
-              />
-            </div>
-          </>
-        )}
 
         <div className="field" style={{ display: "flex", alignItems: "center", gap: 10 }}>
           <label className="switch">
@@ -162,9 +90,9 @@ export default function ObserverModal({
         )}
 
         <div style={{ display: "flex", gap: 10, justifyContent: "flex-end" }}>
-          <button className="btn btn-ghost" onClick={onClose}>Cancel</button>
+          <button className="btn btn-ghost" onClick={onClose}><X size={15} /> Cancel</button>
           <button className="btn btn-primary" onClick={save} disabled={saving}>
-            {saving ? <span className="spinner" /> : initial ? "Save Changes" : "Add Observer"}
+            {saving ? <span className="spinner" /> : <Check size={15} />} {initial ? "Save Changes" : "Add Observer"}
           </button>
         </div>
       </div>

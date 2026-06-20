@@ -6,11 +6,9 @@
 //! owns persistent settings and the multi-observer configuration model.
 
 pub mod debugger;
-pub mod vmix;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 
 use serde::{Deserialize, Serialize};
@@ -18,7 +16,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use debugger::detector::{self, FolderValidation};
 use debugger::parser::ObserverParser;
-use debugger::state::{CurrentObserverState, ObserverUpdate};
+use debugger::state::ObserverUpdate;
 use debugger::watcher::{EmitFn, WatchManager};
 
 // ── Persistent settings model (spec §7, §11) ────────────────────────
@@ -27,9 +25,6 @@ use debugger::watcher::{EmitFn, WatchManager};
 #[serde(rename_all = "snake_case")]
 pub enum ObserverConnectionType {
     Local,
-    NetworkShare,
-    RemoteAgent,
-    CloudRelay,
 }
 
 impl Default for ObserverConnectionType {
@@ -49,14 +44,6 @@ pub struct ObserverConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_debugger_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub network_share_path: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_host: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub remote_port: Option<u16>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub auth_token: Option<String>,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -85,58 +72,37 @@ impl Default for UiPreferences {
     }
 }
 
-/// What an observer should send to vMix (spec §4).
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
-#[serde(rename_all = "lowercase")]
-pub enum VmixSendMode {
-    Uid,
-    Name,
-    Disabled,
-}
-
-impl Default for VmixSendMode {
-    fn default() -> Self {
-        VmixSendMode::Disabled
-    }
-}
-
-/// Per-observer vMix output mapping (spec §4, §5, §15).
+/// Central server bridge configuration (spec §4.2).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
-pub struct ObserverVmixConfig {
-    pub observer_id: String,
+pub struct NetworkSyncConfig {
     #[serde(default)]
-    pub send_mode: VmixSendMode,
+    pub enabled: bool,
+    #[serde(default = "default_api_base_url")]
+    pub api_base_url: String,
+    #[serde(default = "default_socket_url")]
+    pub socket_url: String,
     #[serde(default)]
-    pub source_name: String,
+    pub tournament_id: String,
     #[serde(default)]
-    pub layer: u32,
+    pub secret_key: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct VmixConfig {
-    #[serde(default = "default_vmix_ip")]
-    pub ip: String,
-    #[serde(default = "default_vmix_port")]
-    pub port: u16,
-    #[serde(default)]
-    pub observers: Vec<ObserverVmixConfig>,
+fn default_api_base_url() -> String {
+    "https://facecamapi.ecube.gg".into()
+}
+fn default_socket_url() -> String {
+    "wss://facecamapi.ecube.gg".into()
 }
 
-fn default_vmix_ip() -> String {
-    "127.0.0.1".into()
-}
-fn default_vmix_port() -> u16 {
-    8099
-}
-
-impl Default for VmixConfig {
+impl Default for NetworkSyncConfig {
     fn default() -> Self {
         Self {
-            ip: default_vmix_ip(),
-            port: default_vmix_port(),
-            observers: Vec::new(),
+            enabled: false,
+            api_base_url: default_api_base_url(),
+            socket_url: default_socket_url(),
+            tournament_id: String::new(),
+            secret_key: String::new(),
         }
     }
 }
@@ -194,7 +160,7 @@ pub struct AppSettings {
     #[serde(default)]
     pub ui: UiPreferences,
     #[serde(default)]
-    pub vmix: VmixConfig,
+    pub network_sync: NetworkSyncConfig,
     #[serde(default)]
     pub teams: Vec<Team>,
 }
@@ -206,11 +172,6 @@ struct AppState {
     watch: Arc<WatchManager>,
     /// Last runtime update per observer id (for snapshot queries).
     runtime: Arc<Mutex<HashMap<String, ObserverUpdate>>>,
-    /// Active vMix TCP connection (if connected).
-    vmix_conn: Mutex<Option<std::net::TcpStream>>,
-    vmix_connected: AtomicBool,
-    /// Cache of vMix input titles + when last refreshed (for the existence check).
-    vmix_inputs: Mutex<(std::time::Instant, std::collections::HashSet<String>)>,
 }
 
 #[derive(Serialize)]
@@ -288,9 +249,17 @@ fn save_settings(
 
 #[tauri::command]
 fn detect_debugger_folder() -> Result<DetectionResult, String> {
-    let detected = detector::auto_detect().map(|p| p.to_string_lossy().to_string());
-    let candidates = detector::candidate_paths()
-        .into_iter()
+    // Combine the fast user-profile candidates with a full scan of every drive
+    // so the Free Fire debugger folder is found wherever the game is installed.
+    let mut all = detector::candidate_paths();
+    all.extend(detector::scan_drives());
+    let mut seen = std::collections::HashSet::new();
+    all.retain(|p| seen.insert(p.clone()));
+
+    let detected = detector::pick_best(&all).map(|p| p.to_string_lossy().to_string());
+    let candidates = all
+        .iter()
+        .filter(|p| detector::validate(p).valid)
         .map(|p| p.to_string_lossy().to_string())
         .collect();
     Ok(DetectionResult {
@@ -398,15 +367,10 @@ fn make_emit(app: AppHandle, runtime: Arc<Mutex<HashMap<String, ObserverUpdate>>
 }
 
 fn resolve_local_folder(cfg: &ObserverConfig, settings: &AppSettings) -> Option<PathBuf> {
-    match cfg.conn_type {
-        ObserverConnectionType::Local => cfg
-            .local_debugger_path
-            .clone()
-            .or_else(|| settings.debugger_folder.clone())
-            .map(PathBuf::from),
-        ObserverConnectionType::NetworkShare => cfg.network_share_path.clone().map(PathBuf::from),
-        _ => None,
-    }
+    cfg.local_debugger_path
+        .clone()
+        .or_else(|| settings.debugger_folder.clone())
+        .map(PathBuf::from)
 }
 
 #[tauri::command]
@@ -431,27 +395,14 @@ fn start_observer(
         return Err("Observer is disabled".into());
     }
 
-    match cfg.conn_type {
-        ObserverConnectionType::Local | ObserverConnectionType::NetworkShare => {
-            let folder = folder.ok_or_else(|| {
-                "No debugger folder configured for this observer".to_string()
-            })?;
-            let emit = make_emit(app, state.runtime.clone());
-            state.watch.start(id.clone(), folder, emit);
-            Ok(CommandResult {
-                success: true,
-                message: format!("Watching debugger folder for '{}'", cfg.display_name),
-            })
-        }
-        ObserverConnectionType::RemoteAgent | ObserverConnectionType::CloudRelay => {
-            // Remote sources are driven by the frontend WebSocket client; the
-            // backend does not watch a local folder for them.
-            Ok(CommandResult {
-                success: true,
-                message: "Remote observer is handled by the frontend transport".into(),
-            })
-        }
-    }
+    let folder = folder
+        .ok_or_else(|| "No debugger folder configured for this observer".to_string())?;
+    let emit = make_emit(app, state.runtime.clone());
+    state.watch.start(id.clone(), folder, emit);
+    Ok(CommandResult {
+        success: true,
+        message: format!("Watching debugger folder for '{}'", cfg.display_name),
+    })
 }
 
 #[tauri::command]
@@ -478,15 +429,10 @@ fn start_all_observers(
             let s = state.settings.lock().unwrap();
             resolve_local_folder(cfg, &s)
         };
-        if matches!(
-            cfg.conn_type,
-            ObserverConnectionType::Local | ObserverConnectionType::NetworkShare
-        ) {
-            if let Some(folder) = folder {
-                let emit = make_emit(app.clone(), state.runtime.clone());
-                state.watch.start(cfg.id.clone(), folder, emit);
-                started += 1;
-            }
+        if let Some(folder) = folder {
+            let emit = make_emit(app.clone(), state.runtime.clone());
+            state.watch.start(cfg.id.clone(), folder, emit);
+            started += 1;
         }
     }
     Ok(CommandResult {
@@ -567,437 +513,6 @@ fn fetch_players_from_debugger(
     Ok(players)
 }
 
-// ── vMix Panel (TCP output) ──────────────────────────────────────────
-
-#[derive(Clone, Serialize)]
-struct VmixLog {
-    level: String,
-    message: String,
-}
-
-#[derive(Clone, Serialize)]
-#[serde(rename_all = "camelCase")]
-struct VmixStatus {
-    connected: bool,
-    ip: String,
-    port: u16,
-}
-
-fn vmix_log(app: &AppHandle, level: &str, message: impl Into<String>) {
-    let _ = app.emit(
-        "vmix_log",
-        VmixLog {
-            level: level.into(),
-            message: message.into(),
-        },
-    );
-}
-
-fn emit_vmix_status(app: &AppHandle, state: &AppState) {
-    let cfg = state.settings.lock().unwrap().vmix.clone();
-    let _ = app.emit(
-        "vmix_status",
-        VmixStatus {
-            connected: state.vmix_connected.load(Ordering::SeqCst),
-            ip: cfg.ip,
-            port: cfg.port,
-        },
-    );
-}
-
-#[tauri::command]
-fn vmix_connect(
-    app: AppHandle,
-    ip: String,
-    port: u16,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<CommandResult, String> {
-    use std::net::{TcpStream, ToSocketAddrs};
-    use std::time::Duration;
-
-    let ip = ip.trim().to_string();
-    if ip.is_empty() {
-        return Err("Please enter a valid vMix IP address.".into());
-    }
-    if port == 0 {
-        return Err("Please enter a valid TCP port.".into());
-    }
-
-    // Persist ip/port immediately so they survive restarts.
-    {
-        let mut s = state.settings.lock().unwrap();
-        s.vmix.ip = ip.clone();
-        s.vmix.port = port;
-        persist_settings(&s)?;
-    }
-
-    let addr = format!("{ip}:{port}");
-    let socket = addr
-        .to_socket_addrs()
-        .map_err(|_| "Please enter a valid vMix IP address.".to_string())?
-        .next()
-        .ok_or("Please enter a valid vMix IP address.")?;
-
-    vmix_log(&app, "info", format!("Connecting to vMix at {addr}…"));
-    match TcpStream::connect_timeout(&socket, Duration::from_secs(4)) {
-        Ok(stream) => {
-            let _ = stream.set_write_timeout(Some(Duration::from_secs(3)));
-            // Read timeout so we can capture vMix's reply / XML state.
-            let _ = stream.set_read_timeout(Some(Duration::from_secs(2)));
-            *state.vmix_conn.lock().unwrap() = Some(stream);
-            state.vmix_connected.store(true, Ordering::SeqCst);
-            // Force an input-list refresh on next send.
-            {
-                let mut cache = state.vmix_inputs.lock().unwrap();
-                cache.0 = std::time::Instant::now() - std::time::Duration::from_secs(3600);
-            }
-            vmix_log(&app, "success", format!("vMix TCP connected at {addr}"));
-            emit_vmix_status(&app, &state);
-            Ok(CommandResult {
-                success: true,
-                message: "Connected".into(),
-            })
-        }
-        Err(e) => {
-            state.vmix_connected.store(false, Ordering::SeqCst);
-            emit_vmix_status(&app, &state);
-            let msg = format!("Failed to connect to vMix: {e}");
-            vmix_log(&app, "error", msg.clone());
-            Err(msg)
-        }
-    }
-}
-
-#[tauri::command]
-fn vmix_disconnect(
-    app: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<CommandResult, String> {
-    *state.vmix_conn.lock().unwrap() = None;
-    state.vmix_connected.store(false, Ordering::SeqCst);
-    vmix_log(&app, "info", "vMix disconnected");
-    emit_vmix_status(&app, &state);
-    Ok(CommandResult {
-        success: true,
-        message: "Disconnected".into(),
-    })
-}
-
-#[tauri::command]
-fn vmix_get_status(state: tauri::State<'_, Arc<AppState>>) -> Result<VmixStatus, String> {
-    let cfg = state.settings.lock().unwrap().vmix.clone();
-    Ok(VmixStatus {
-        connected: state.vmix_connected.load(Ordering::SeqCst),
-        ip: cfg.ip,
-        port: cfg.port,
-    })
-}
-
-/// Low-level write helper. Sends `payload` and returns vMix's reply line
-/// (e.g. `FUNCTION OK` or `FUNCTION ER ...`). Drops the connection on a write
-/// failure so the UI reflects a real disconnect instead of silently failing.
-fn vmix_write(app: &AppHandle, state: &AppState, payload: &str) -> Result<String, String> {
-    use std::io::Read;
-
-    let mut guard = state.vmix_conn.lock().unwrap();
-    let stream = guard.as_mut().ok_or("vMix is not connected.")?;
-
-    if let Err(e) = vmix::send(stream, payload) {
-        *guard = None;
-        drop(guard);
-        state.vmix_connected.store(false, Ordering::SeqCst);
-        emit_vmix_status(app, state);
-        vmix_log(app, "error", format!("Failed to send data to vMix. {e}"));
-        return Err(format!("Failed to send data to vMix. {e}"));
-    }
-
-    // Capture vMix's response (best-effort; empty on read timeout).
-    let mut buf = [0u8; 512];
-    let reply = match stream.read(&mut buf) {
-        Ok(n) if n > 0 => String::from_utf8_lossy(&buf[..n]).trim().to_string(),
-        _ => String::new(),
-    };
-    Ok(reply)
-}
-
-#[tauri::command]
-fn vmix_test(
-    app: AppHandle,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<CommandResult, String> {
-    if !state.vmix_connected.load(Ordering::SeqCst) {
-        return Err("vMix is not connected.".into());
-    }
-    // TALLY is a harmless vMix TCP API query with a short reply ("TALLY OK …").
-    let reply = vmix_write(&app, &state, "TALLY\r\n")?;
-    let short = reply.lines().next().unwrap_or("").to_string();
-    vmix_log(
-        &app,
-        "success",
-        format!("Test OK — vMix responded: {}", if short.is_empty() { "(no reply)" } else { &short }),
-    );
-    Ok(CommandResult {
-        success: true,
-        message: "Data sent to vMix successfully.".into(),
-    })
-}
-
-/// Send a resolved observer's UID/Name to vMix according to its per-observer
-/// config. No-op when not connected, observer disabled, or value missing.
-#[tauri::command]
-fn vmix_send_observer(
-    app: AppHandle,
-    observer_id: String,
-    observer: CurrentObserverState,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<CommandResult, String> {
-    if !state.vmix_connected.load(Ordering::SeqCst) {
-        return Ok(CommandResult {
-            success: false,
-            message: "vMix is not connected.".into(),
-        });
-    }
-
-    // Resolve config, observer display name, and the roster entry for this UID.
-    let (cfg, display, roster_entry, team_name) = {
-        let s = state.settings.lock().unwrap();
-        let cfg = s
-            .vmix
-            .observers
-            .iter()
-            .find(|o| o.observer_id == observer_id)
-            .cloned();
-        let display = s
-            .observers
-            .iter()
-            .find(|o| o.id == observer_id)
-            .map(|o| o.display_name.clone())
-            .unwrap_or_else(|| observer_id.clone());
-        let uid = observer.uid.clone().unwrap_or_default();
-        let mut roster_entry = None;
-        let mut team_name = String::new();
-        if !uid.is_empty() {
-            'outer: for t in &s.teams {
-                for p in &t.players {
-                    if p.uid == uid {
-                        roster_entry = Some(p.clone());
-                        team_name = t.name.clone();
-                        break 'outer;
-                    }
-                }
-            }
-        }
-        (cfg, display, roster_entry, team_name)
-    };
-
-    let cfg = match cfg {
-        Some(c) if c.send_mode != VmixSendMode::Disabled => c,
-        _ => {
-            return Ok(CommandResult {
-                success: false,
-                message: "Observer disabled".into(),
-            })
-        }
-    };
-
-    // Determine the vMix input name to route from the send mode: the player
-    // name (roster name preferred) or the UID.
-    let kind = match cfg.send_mode {
-        VmixSendMode::Name => "Name",
-        _ => "UID",
-    };
-    let input_name = match cfg.send_mode {
-        VmixSendMode::Name => roster_entry
-            .as_ref()
-            .map(|p| p.player_name.clone())
-            .filter(|n| !n.is_empty())
-            .or_else(|| observer.name.clone())
-            .unwrap_or_default(),
-        _ => observer.uid.clone().unwrap_or_default(),
-    };
-    let player_label = roster_entry
-        .as_ref()
-        .map(|p| {
-            if team_name.is_empty() {
-                p.player_name.clone()
-            } else {
-                format!("{} · {}", team_name, p.player_name)
-            }
-        })
-        .filter(|s| !s.trim().is_empty())
-        .unwrap_or_else(|| input_name.clone());
-
-    if input_name.is_empty() {
-        return Ok(CommandResult {
-            success: false,
-            message: "No value to send".into(),
-        });
-    }
-    if cfg.source_name.trim().is_empty() {
-        let msg = "Please enter the vMix source name.".to_string();
-        vmix_log(&app, "error", msg.clone());
-        return Err(msg);
-    }
-
-    // ── Single locked section: refresh input cache, verify, then send ──
-    let mut guard = state.vmix_conn.lock().unwrap();
-    let stream = match guard.as_mut() {
-        Some(s) => s,
-        None => return Err("vMix is not connected.".into()),
-    };
-
-    // Refresh the cached input list at most every 3s.
-    {
-        let mut cache = state.vmix_inputs.lock().unwrap();
-        if cache.0.elapsed() > std::time::Duration::from_secs(3) {
-            if let Ok(titles) = vmix::query_input_titles(stream) {
-                *cache = (std::time::Instant::now(), titles);
-            }
-        }
-        // Safety net: if we have an input list and the target isn't in it, the
-        // player has no vMix input yet — report instead of silently doing nothing.
-        if !cache.1.is_empty() && !cache.1.contains(&input_name) {
-            drop(cache);
-            drop(guard);
-            vmix_log(
-                &app,
-                "error",
-                format!(
-                    "[{display}] No vMix input named \"{input_name}\" — add that input in vMix or set a vMix Input in Team Info."
-                ),
-            );
-            return Ok(CommandResult {
-                success: false,
-                message: format!("No vMix input named \"{input_name}\""),
-            });
-        }
-    }
-
-    let payload = vmix::build_payload(&cfg.source_name, cfg.layer, &input_name);
-    let reply = match vmix::send_command(stream, &payload) {
-        Ok(r) => r,
-        Err(e) => {
-            *guard = None;
-            drop(guard);
-            state.vmix_connected.store(false, Ordering::SeqCst);
-            emit_vmix_status(&app, &state);
-            vmix_log(&app, "error", format!("Failed to send data to vMix. {e}"));
-            return Err(format!("Failed to send data to vMix. {e}"));
-        }
-    };
-    drop(guard);
-
-    if reply.contains("ER") {
-        vmix_log(
-            &app,
-            "error",
-            format!(
-                "[{display}] vMix rejected: {reply} — check Source Name \"{}\" and Layer {}.",
-                cfg.source_name, cfg.layer
-            ),
-        );
-        return Ok(CommandResult {
-            success: false,
-            message: format!("vMix rejected: {reply}"),
-        });
-    }
-
-    vmix_log(
-        &app,
-        "success",
-        format!(
-            "[{display}] {kind} {player_label} → {} Layer {} (input \"{input_name}\")",
-            cfg.source_name, cfg.layer
-        ),
-    );
-    Ok(CommandResult {
-        success: true,
-        message: "Data sent to vMix successfully.".into(),
-    })
-}
-
-// ── LAN discovery (spec §8.1 — easy pairing) ─────────────────────────
-
-const DISCOVERY_PORT: u16 = 8788;
-
-#[derive(Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct Beacon {
-    facecam: String,
-    #[serde(default)]
-    agent_id: String,
-    #[serde(default)]
-    machine_name: String,
-    #[serde(default)]
-    ws_port: u16,
-    #[serde(default)]
-    token: Option<String>,
-    #[serde(default)]
-    status: Option<String>,
-}
-
-#[derive(Serialize, Clone)]
-#[serde(rename_all = "camelCase")]
-struct DiscoveredAgent {
-    agent_id: String,
-    machine_name: String,
-    host: String,
-    ws_port: u16,
-    token: Option<String>,
-    status: Option<String>,
-}
-
-/// Listen for agent discovery beacons on the LAN for `duration_ms` and return
-/// the unique agents found. Each agent's IP comes from the UDP packet source,
-/// so the operator never types a host/port/token.
-#[tauri::command]
-async fn scan_observers(duration_ms: Option<u64>) -> Result<Vec<DiscoveredAgent>, String> {
-    let dur = duration_ms.unwrap_or(3000).clamp(500, 15000);
-    tokio::task::spawn_blocking(move || scan_blocking(dur))
-        .await
-        .map_err(|e| format!("scan task failed: {e}"))?
-}
-
-fn scan_blocking(duration_ms: u64) -> Result<Vec<DiscoveredAgent>, String> {
-    use std::net::UdpSocket;
-    use std::time::{Duration, Instant};
-
-    let socket = UdpSocket::bind(("0.0.0.0", DISCOVERY_PORT))
-        .map_err(|e| format!("Cannot listen on UDP {DISCOVERY_PORT} (is another scan running?): {e}"))?;
-    socket
-        .set_read_timeout(Some(Duration::from_millis(400)))
-        .map_err(|e| format!("Cannot set socket timeout: {e}"))?;
-
-    let deadline = Instant::now() + Duration::from_millis(duration_ms);
-    let mut found: HashMap<String, DiscoveredAgent> = HashMap::new();
-    let mut buf = [0u8; 2048];
-
-    while Instant::now() < deadline {
-        match socket.recv_from(&mut buf) {
-            Ok((n, src)) => {
-                if let Ok(b) = serde_json::from_slice::<Beacon>(&buf[..n]) {
-                    if b.facecam == "observer-agent" && !b.agent_id.is_empty() {
-                        found.insert(
-                            b.agent_id.clone(),
-                            DiscoveredAgent {
-                                agent_id: b.agent_id,
-                                machine_name: b.machine_name,
-                                host: src.ip().to_string(),
-                                ws_port: b.ws_port,
-                                token: b.token,
-                                status: b.status,
-                            },
-                        );
-                    }
-                }
-            }
-            Err(_) => continue, // read timeout — keep waiting until the deadline
-        }
-    }
-
-    Ok(found.into_values().collect())
-}
-
 // ── App entry ────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -1008,12 +523,6 @@ pub fn run() {
         settings: Mutex::new(settings),
         watch: Arc::new(WatchManager::new()),
         runtime: Arc::new(Mutex::new(HashMap::new())),
-        vmix_conn: Mutex::new(None),
-        vmix_connected: AtomicBool::new(false),
-        vmix_inputs: Mutex::new((
-            std::time::Instant::now() - std::time::Duration::from_secs(3600),
-            std::collections::HashSet::new(),
-        )),
     });
 
     tauri::Builder::default()
@@ -1037,10 +546,6 @@ pub fn run() {
                     conn_type: ObserverConnectionType::Local,
                     enabled: true,
                     local_debugger_path: None,
-                    network_share_path: None,
-                    remote_host: None,
-                    remote_port: None,
-                    auth_token: None,
                     created_at: now_iso(),
                     updated_at: now_iso(),
                 });
@@ -1065,12 +570,6 @@ pub fn run() {
             get_observer_states,
             app_version,
             fetch_players_from_debugger,
-            scan_observers,
-            vmix_connect,
-            vmix_disconnect,
-            vmix_get_status,
-            vmix_test,
-            vmix_send_observer,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

@@ -5,14 +5,11 @@
 import { invoke } from "@tauri-apps/api/core";
 import type {
   AppSettings,
-  CurrentObserverState,
   DetectionResult,
-  DiscoveredAgent,
   FetchedPlayer,
   FolderValidation,
   ObserverConfig,
   ObserverUpdate,
-  VmixStatus,
 } from "./types";
 
 type CommandResult = { success: boolean; message: string };
@@ -44,14 +41,4 @@ export const api = {
   appVersion: () => invoke<string>("app_version"),
   fetchPlayersFromDebugger: () =>
     invoke<FetchedPlayer[]>("fetch_players_from_debugger"),
-  scanObservers: (durationMs = 3000) =>
-    invoke<DiscoveredAgent[]>("scan_observers", { durationMs }),
-
-  vmixConnect: (ip: string, port: number) =>
-    invoke<CommandResult>("vmix_connect", { ip, port }),
-  vmixDisconnect: () => invoke<CommandResult>("vmix_disconnect"),
-  vmixGetStatus: () => invoke<VmixStatus>("vmix_get_status"),
-  vmixTest: () => invoke<CommandResult>("vmix_test"),
-  vmixSendObserver: (observerId: string, observer: CurrentObserverState) =>
-    invoke<CommandResult>("vmix_send_observer", { observerId, observer }),
 };

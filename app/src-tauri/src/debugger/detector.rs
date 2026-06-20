@@ -1,7 +1,12 @@
 //! Debugger folder detection and latest-file resolution (spec §3.2, §3.3, §4).
 
+use std::collections::VecDeque;
 use std::path::{Path, PathBuf};
 use std::time::SystemTime;
+
+/// The Free Fire data directory name and its debugger subfolder.
+const DATA_DIR: &str = "Free Fire_64_Data";
+const DEBUGGER_SUB: &str = "Debugger";
 
 /// File extensions/names we treat as debugger log files.
 const LOG_EXTENSIONS: &[&str] = &["log", "txt"];
@@ -25,12 +30,10 @@ pub struct FolderValidation {
 /// debugger folder (spec §4). Order matters: most-likely first.
 pub fn candidate_paths() -> Vec<PathBuf> {
     let mut out = Vec::new();
-    const SUFFIX: &str = "Free Fire_64_Data";
-    const SUB: &str = "Debugger";
 
     let mut push = |base: Option<PathBuf>| {
         if let Some(base) = base {
-            out.push(base.join(SUFFIX).join(SUB));
+            out.push(base.join(DATA_DIR).join(DEBUGGER_SUB));
         }
     };
 
@@ -46,11 +49,117 @@ pub fn candidate_paths() -> Vec<PathBuf> {
     out
 }
 
-/// Auto-detect the first valid debugger folder from the candidate list.
+/// Quick auto-detect from the well-known user-profile candidate list.
+/// Used at startup so launch stays fast (no full-drive scan).
 pub fn auto_detect() -> Option<PathBuf> {
     candidate_paths()
         .into_iter()
         .find(|p| validate(p).valid)
+}
+
+/// From a set of candidate debugger folders, pick the best one: prefer a
+/// folder that already holds log files, otherwise the first valid one.
+pub fn pick_best(paths: &[PathBuf]) -> Option<PathBuf> {
+    paths
+        .iter()
+        .find(|p| validate(p).has_log_files)
+        .cloned()
+        .or_else(|| paths.iter().find(|p| validate(p).valid).cloned())
+}
+
+/// Roots to scan — every available drive on Windows, `/` elsewhere.
+fn drive_roots() -> Vec<PathBuf> {
+    #[cfg(windows)]
+    {
+        let mut v = Vec::new();
+        for c in b'A'..=b'Z' {
+            let root = PathBuf::from(format!("{}:\\", c as char));
+            if root.is_dir() {
+                v.push(root);
+            }
+        }
+        v
+    }
+    #[cfg(not(windows))]
+    {
+        vec![PathBuf::from("/")]
+    }
+}
+
+/// Directories that are large/system/irrelevant — skipped while scanning.
+fn should_skip(name: &str) -> bool {
+    if name.starts_with('$') {
+        return true;
+    }
+    matches!(
+        name.to_ascii_lowercase().as_str(),
+        "windows"
+            | "system volume information"
+            | "recovery"
+            | "perflogs"
+            | "node_modules"
+            | "windows.old"
+            | ".git"
+    )
+}
+
+/// Scan every drive for `…\Free Fire_64_Data\Debugger` folders, regardless of
+/// which drive the game/emulator is installed on. Bounded by depth and a total
+/// directory budget so it stays responsive even on large disks.
+pub fn scan_drives() -> Vec<PathBuf> {
+    const MAX_DEPTH: usize = 6;
+    const MAX_TOTAL_DIRS: usize = 120_000;
+
+    let mut out: Vec<PathBuf> = Vec::new();
+    let mut budget = MAX_TOTAL_DIRS;
+
+    for root in drive_roots() {
+        let mut queue: VecDeque<(PathBuf, usize)> = VecDeque::new();
+        queue.push_back((root, 0));
+
+        while let Some((dir, depth)) = queue.pop_front() {
+            if budget == 0 {
+                break;
+            }
+            let entries = match std::fs::read_dir(&dir) {
+                Ok(e) => e,
+                Err(_) => continue,
+            };
+            for entry in entries.flatten() {
+                if budget == 0 {
+                    break;
+                }
+                // `file_type()` does not follow symlinks, avoiding loops.
+                let is_dir = entry.file_type().map(|t| t.is_dir()).unwrap_or(false);
+                if !is_dir {
+                    continue;
+                }
+                budget -= 1;
+                let name = entry.file_name();
+                let name = name.to_string_lossy();
+                if should_skip(&name) {
+                    continue;
+                }
+                let path = entry.path();
+                if name.eq_ignore_ascii_case(DATA_DIR) {
+                    let dbg = path.join(DEBUGGER_SUB);
+                    if dbg.is_dir() {
+                        out.push(dbg);
+                    }
+                    // Don't descend further into the matched data dir.
+                    continue;
+                }
+                if depth + 1 <= MAX_DEPTH {
+                    queue.push_back((path, depth + 1));
+                }
+            }
+        }
+    }
+
+    // De-duplicate while preserving order.
+    let mut seen = std::collections::HashSet::new();
+    out.retain(|p| seen.insert(p.clone()));
+    out
 }
 
 /// Validate a folder path against the spec's criteria.

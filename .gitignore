@@ -13,7 +13,6 @@ crash.log
 
 # Tauri generated
 app/src-tauri/gen/
-observer-app/src-tauri/gen/
 
 # Stale OCR artifacts (OCR removed — kept ignored so they can't return)
 DirectML.dll

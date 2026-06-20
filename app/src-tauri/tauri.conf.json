@@ -32,6 +32,11 @@
   "bundle": {
     "active": true,
     "targets": "nsis",
+    "publisher": "THEMIS",
+    "homepage": "https://ecube.gg/",
+    "shortDescription": "Ensure Event Excellence",
+    "longDescription": "Ensure Event Excellence",
+    "copyright": "© 2026 THEMIS",
     "icon": [
       "icons/32x32.png",
       "icons/128x128.png",
@@ -42,7 +47,8 @@
     "windows": {
       "nsis": {
         "installMode": "perMachine",
-        "installerIcon": "icons/icon.ico"
+        "installerIcon": "icons/icon.ico",
+        "installerHooks": "nsis-hooks.nsh"
       },
       "webviewInstallMode": {
         "type": "downloadBootstrapper"

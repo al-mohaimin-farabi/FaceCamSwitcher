@@ -1,33 +1,21 @@
 import { useState } from "react";
 import {
   LayoutDashboard,
-  Users,
-  Radio,
-  FolderCog,
-  Tv,
+  Globe,
   IdCard,
-  Settings as SettingsIcon,
 } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
-import Observers from "./pages/Observers";
-import LiveFeed from "./pages/LiveFeed";
-import Sources from "./pages/Sources";
 import TeamInfo from "./pages/TeamInfo";
-import VmixPanel from "./pages/VmixPanel";
-import AppSettingsPage from "./pages/AppSettingsPage";
+import NetworkSync from "./pages/NetworkSync";
 import { useBootstrap } from "./lib/useBootstrap";
 import { useAppSelector } from "./store/hooks";
 
-type Page = "dashboard" | "observers" | "live" | "sources" | "teams" | "vmix" | "settings";
+type Page = "dashboard" | "teams" | "networksync";
 
 const NAV: { id: Page; label: string; icon: React.ReactNode }[] = [
   { id: "dashboard", label: "Dashboard", icon: <LayoutDashboard size={17} /> },
-  { id: "observers", label: "Observers", icon: <Users size={17} /> },
-  { id: "live", label: "Live Feed", icon: <Radio size={17} /> },
-  { id: "sources", label: "Debugger Source", icon: <FolderCog size={17} /> },
   { id: "teams", label: "Team Info", icon: <IdCard size={17} /> },
-  { id: "vmix", label: "vMix Panel", icon: <Tv size={17} /> },
-  { id: "settings", label: "Settings", icon: <SettingsIcon size={17} /> },
+  { id: "networksync", label: "Network Sync", icon: <Globe size={17} /> },
 ];
 
 function App() {
@@ -78,12 +66,8 @@ function App() {
       {/* ── Content ─────────────────────────────── */}
       <main style={{ flex: 1, overflow: "auto" }}>
         {page === "dashboard" && <Dashboard />}
-        {page === "observers" && <Observers />}
-        {page === "live" && <LiveFeed />}
-        {page === "sources" && <Sources />}
         {page === "teams" && <TeamInfo />}
-        {page === "vmix" && <VmixPanel />}
-        {page === "settings" && <AppSettingsPage />}
+        {page === "networksync" && <NetworkSync />}
       </main>
     </div>
   );
