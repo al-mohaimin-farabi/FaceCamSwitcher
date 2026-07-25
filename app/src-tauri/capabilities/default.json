@@ -3,9 +3,5 @@
   "identifier": "default",
   "description": "FaceCam default capabilities",
   "windows": ["main", "region-selector"],
-  "permissions": [
-    "core:default",
-    "fs:default",
-    "core:window:allow-close"
-  ]
+  "permissions": ["core:default", "fs:default", "core:window:allow-close"]
 }
