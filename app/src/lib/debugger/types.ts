@@ -18,6 +18,8 @@ export type ObserverConfig = {
   type: ObserverConnectionType;
   enabled: boolean;
   localDebuggerPath?: string;
+  /** Which vMix output slot ("01"/"02"/"03") this PC's detections report into. */
+  sourceId: string;
   createdAt: string;
   updatedAt: string;
 };
@@ -50,12 +52,23 @@ export type TeamPlayer = {
   uid: string;
   playerId: string;
   role: PlayerRole;
+  /** Resolved database player id (matched by name) — QA visibility only,
+   *  not used for switch-time resolution. */
+  dbPlayerId?: string;
 };
 
 export type FetchedPlayer = {
   uid: string;
   name: string;
   playerId: string;
+};
+
+/** A player as recorded in the FaceCam tournament database — distinct from
+ *  FetchedPlayer, which comes from the live debugger log. */
+export type DbPlayer = {
+  id: string;
+  ign: string;
+  playerNumber?: number | null;
 };
 
 export type Team = {

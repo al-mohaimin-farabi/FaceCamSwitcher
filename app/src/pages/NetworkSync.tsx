@@ -1,27 +1,63 @@
-import { useState } from "react";
-import { Radio, PlugZap, Plug, Send, Trash2, Globe } from "lucide-react";
+import { useEffect, useState } from "react";
+import {
+  Radio,
+  PlugZap,
+  Plug,
+  Send,
+  Trash2,
+  Globe,
+  Wifi,
+  WifiOff,
+} from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
 import { setSettings, clearNetworkSyncLog } from "../store/observerSlice";
 import { api } from "../lib/debugger/api";
-import {
-  networkSync,
-  testConnection,
-  validateConfig,
-} from "../lib/debugger/networkSync";
+import { networkSync, validateConfig } from "../lib/debugger/networkSync";
 import type { AppSettings, NetworkSyncConfig } from "../lib/debugger/types";
 
 export default function NetworkSync() {
   const dispatch = useAppDispatch();
   const settings = useAppSelector((s) => s.observer.settings);
   const connected = useAppSelector((s) => s.observer.networkSyncConnected);
+  const authenticated = useAppSelector(
+    (s) => s.observer.networkSyncAuthenticated,
+  );
+  const observers = useAppSelector((s) => s.observer.observers);
   const log = useAppSelector((s) => s.observer.networkSyncLog);
 
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [testMsg, setTestMsg] = useState<string | null>(null);
+  const [serverOnline, setServerOnline] = useState<boolean | null>(null);
 
-  if (!settings) return <div className="page">Loading…</div>;
-  const cfg = settings.networkSync;
+  const cfg = settings?.networkSync;
+  const sourceId = observers[0]?.sourceId || "01";
+
+  // Ping /api/health every 15s while enabled — same cadence localized-input's
+  // Settings.tsx uses, via Rust reqwest so there's no CORS question.
+  useEffect(() => {
+    if (!cfg?.enabled || !cfg.apiBaseUrl) {
+      setServerOnline(null);
+      return;
+    }
+    let cancelled = false;
+    const checkHealth = async () => {
+      try {
+        const result = await api.checkServerHealth();
+        if (!cancelled) setServerOnline(result.success);
+      } catch {
+        if (!cancelled) setServerOnline(false);
+      }
+    };
+    checkHealth();
+    const interval = setInterval(checkHealth, 15000);
+    return () => {
+      cancelled = true;
+      clearInterval(interval);
+    };
+  }, [cfg?.enabled, cfg?.apiBaseUrl]);
+
+  if (!settings || !cfg) return <div className="page">Loading…</div>;
 
   const persist = async (patch: Partial<NetworkSyncConfig>) => {
     const next: AppSettings = {
@@ -38,7 +74,7 @@ export default function NetworkSync() {
     if (err) return setError(err);
     setBusy(true);
     try {
-      networkSync.connect(cfg);
+      networkSync.connect(cfg, sourceId);
     } finally {
       setBusy(false);
     }
@@ -53,8 +89,9 @@ export default function NetworkSync() {
     setTestMsg(null);
     setBusy(true);
     try {
-      const msg = await testConnection(cfg);
-      setTestMsg(msg);
+      const result = await api.checkServerHealth();
+      if (result.success) setTestMsg(result.message);
+      else setError(result.message);
     } catch (e) {
       setError(String(e instanceof Error ? e.message : e));
     } finally {
@@ -75,14 +112,31 @@ export default function NetworkSync() {
         <div>
           <div className="page-title">Network Sync</div>
           <div className="page-subtitle">
-            Push detected observer data to the central server in real time.
+            Push detected observer switches to the FaceCam server in real time
+            (Source {sourceId}).
           </div>
         </div>
-        <span
-          className={`badge ${connected ? "badge-connected" : "badge-error"}`}
-        >
-          <span className="dot" /> {connected ? "Online" : "Offline"}
-        </span>
+        <div style={{ display: "flex", gap: 8 }}>
+          {serverOnline !== null && (
+            <span
+              className={`badge ${serverOnline ? "badge-connected" : "badge-error"}`}
+              title="Tournament server /api/health"
+            >
+              <span className="dot" /> Server{" "}
+              {serverOnline ? "Online" : "Offline"}
+            </span>
+          )}
+          <span
+            className={`badge ${authenticated ? "badge-connected" : connected ? "badge-waiting" : "badge-error"}`}
+          >
+            <span className="dot" />{" "}
+            {authenticated
+              ? "Authenticated"
+              : connected
+                ? "Connecting…"
+                : "Offline"}
+          </span>
+        </div>
       </div>
 
       {/* Enable + configuration */}
@@ -108,7 +162,9 @@ export default function NetworkSync() {
             <div
               style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}
             >
-              Connects to the server via Socket.io when observing starts.
+              Connects via Socket.io when you press Start on the Dashboard — not
+              on app launch, so this PC doesn't claim Source {sourceId}
+              before you're ready to observe.
             </div>
           </div>
           <label className="switch">
@@ -179,7 +235,7 @@ export default function NetworkSync() {
               disabled={busy}
             >
               {busy ? <span className="spinner" /> : <PlugZap size={15} />}{" "}
-              Connect
+              Connect (manual test)
             </button>
           )}
           <button className="btn btn-ghost" onClick={test} disabled={busy}>

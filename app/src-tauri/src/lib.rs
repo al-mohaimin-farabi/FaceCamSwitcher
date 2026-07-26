@@ -11,6 +11,7 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::{Arc, Mutex};
 
+use reqwest::Client as HttpClient;
 use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
@@ -124,6 +125,11 @@ pub struct TeamPlayer {
     pub player_id: String,
     #[serde(default)]
     pub role: PlayerRole,
+    /// Resolved database player id (matched by name against a Fetch Players
+    /// database sync) — set for pre-match QA visibility, not used for
+    /// switch-time resolution, which matches by name directly.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub db_player_id: Option<String>,
 }
 
 /// A team — the per-tournament source of truth (4 main + 1 substitute players).
@@ -476,6 +482,112 @@ fn fetch_players_from_debugger(
     Ok(players)
 }
 
+// ── Database player fetch (Network Sync) ────────────────────────────
+
+/// A player as recorded in the FaceCam tournament database — distinct from
+/// [`FetchedPlayer`], which comes from the live debugger log. The database
+/// knows `id`/`ign`/`playerNumber`; it has no idea about Free Fire's own
+/// `uid`/`playerId` — those only ever appear in the debugger stream.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct DbPlayer {
+    pub id: String,
+    pub ign: String,
+    #[serde(default)]
+    pub player_number: Option<i32>,
+}
+
+#[derive(Deserialize)]
+struct FetchDbPlayersResponse {
+    players: Vec<DbPlayer>,
+}
+
+/// Fetch the tournament's registered player list from the FaceCam server —
+/// `GET {api_base_url}/api/ocr/tournament/{tournament_id}`, Bearer
+/// `secret_key`. Same endpoint and shape `localized-input`/`OCR` already use.
+/// Stateless: the frontend caches the result, this command is a plain
+/// pass-through so there's one source of truth for the list.
+#[tauri::command]
+async fn fetch_players_from_server(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<Vec<DbPlayer>, String> {
+    let (api_base_url, tournament_id, secret_key) = {
+        let s = state.settings.lock().unwrap();
+        let n = &s.network_sync;
+        (
+            n.api_base_url.clone(),
+            n.tournament_id.clone(),
+            n.secret_key.clone(),
+        )
+    };
+
+    if api_base_url.is_empty() || tournament_id.is_empty() || secret_key.is_empty() {
+        return Err("API URL, Tournament ID, and Secret Key are all required.".into());
+    }
+
+    let url = format!(
+        "{}/api/ocr/tournament/{}",
+        api_base_url.trim_end_matches('/'),
+        tournament_id
+    );
+
+    let client = HttpClient::new();
+    let resp = client
+        .get(&url)
+        .header("Authorization", format!("Bearer {secret_key}"))
+        .send()
+        .await
+        .map_err(|e| format!("Request failed: {e}"))?;
+
+    if !resp.status().is_success() {
+        return Err(format!("Server returned {}", resp.status()));
+    }
+
+    let data: FetchDbPlayersResponse = resp
+        .json()
+        .await
+        .map_err(|e| format!("Failed to parse response: {e}"))?;
+
+    Ok(data.players)
+}
+
+/// Ping `/api/health` on the configured API server via Rust `reqwest` — kept
+/// server-side (not a frontend `fetch()`) to sidestep any CORS question
+/// entirely, same reasoning `localized-input`/`OCR` use for the same check.
+#[tauri::command]
+async fn check_server_health(
+    state: tauri::State<'_, Arc<AppState>>,
+) -> Result<CommandResult, String> {
+    let api_base_url = state.settings.lock().unwrap().network_sync.api_base_url.clone();
+    if api_base_url.is_empty() {
+        return Ok(CommandResult {
+            success: false,
+            message: "API URL not configured".into(),
+        });
+    }
+
+    let url = format!("{}/api/health", api_base_url.trim_end_matches('/'));
+    let client = HttpClient::builder()
+        .timeout(std::time::Duration::from_secs(5))
+        .build()
+        .map_err(|e| format!("HTTP client error: {e}"))?;
+
+    match client.get(&url).send().await {
+        Ok(resp) if resp.status().is_success() => Ok(CommandResult {
+            success: true,
+            message: "Server online".into(),
+        }),
+        Ok(resp) => Ok(CommandResult {
+            success: false,
+            message: format!("Server returned {}", resp.status()),
+        }),
+        Err(e) => Ok(CommandResult {
+            success: false,
+            message: format!("Unreachable: {e}"),
+        }),
+    }
+}
+
 // ── App entry ────────────────────────────────────────────────────────
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
@@ -508,6 +620,7 @@ pub fn run() {
                     conn_type: ObserverConnectionType::Local,
                     enabled: true,
                     local_debugger_path: None,
+                    source_id: default_source_id(),
                     created_at: now_iso(),
                     updated_at: now_iso(),
                 });
@@ -531,6 +644,8 @@ pub fn run() {
             get_observer_states,
             app_version,
             fetch_players_from_debugger,
+            fetch_players_from_server,
+            check_server_health,
         ])
         .run(tauri::generate_context!())
         .expect("error while running tauri application");

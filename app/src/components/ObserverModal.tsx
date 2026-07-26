@@ -46,7 +46,9 @@ export default function ObserverModal({
             marginBottom: 20,
           }}
         >
-          <div style={{ fontSize: 18, fontWeight: 700 }}>Configure Observer</div>
+          <div style={{ fontSize: 18, fontWeight: 700 }}>
+            Configure Observer
+          </div>
           <button className="btn btn-ghost btn-sm" onClick={onClose}>
             <X size={16} />
           </button>
@@ -74,6 +76,23 @@ export default function ObserverModal({
               set({ localDebuggerPath: e.target.value || undefined })
             }
           />
+        </div>
+
+        <div className="field">
+          <label className="field-label">
+            Source Slot — which output this PC feeds
+          </label>
+          <select
+            className="input"
+            value={draft.sourceId || "01"}
+            onChange={(e) => set({ sourceId: e.target.value })}
+          >
+            {["01", "02", "03"].map((id) => (
+              <option key={id} value={id}>
+                Source {id}
+              </option>
+            ))}
+          </select>
         </div>
 
         <div
@@ -106,8 +125,8 @@ export default function ObserverModal({
             <X size={15} /> Cancel
           </button>
           <button className="btn btn-primary" onClick={save} disabled={saving}>
-            {saving ? <span className="spinner" /> : <Check size={15} />}{" "}
-            Save Changes
+            {saving ? <span className="spinner" /> : <Check size={15} />} Save
+            Changes
           </button>
         </div>
       </div>

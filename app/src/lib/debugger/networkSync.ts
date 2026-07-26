@@ -1,12 +1,14 @@
-// Network Sync transport (spec §4).
+// Network Sync transport.
 //
-// Connects this FaceCam instance to the central server over Socket.io and
-// pushes detected observer switches in real time. Replaces the old per-PC
-// remote/peer model with a single central bridge.
+// Connects this FaceCam instance to the FaceCam server's OCR bridge
+// (server/src/media/ocr.handler.js) over Socket.io and relays detected
+// observer switches in real time, resolved to database player ids.
 //
-// The exact Socket.io event names and auth shape must match the
-// `facecamapi.ecube.gg` server. They are isolated in PROTOCOL below so they are
-// trivial to adjust in one place if the server contract changes.
+// Auth: query-param handshake (?ocrKey=&tournamentId=&sourceId=), validated
+// synchronously by the server on connect — the same path localized-input's
+// Rust app uses, chosen there because it's more reliable than an ack-based
+// event handshake. Events: ocrAuthSuccess / ocrAuthFailed / srcOcrConflict on
+// the way in, playerDetected / noMatch on the way out.
 
 import { io, type Socket } from "socket.io-client";
 import type {
@@ -16,23 +18,27 @@ import type {
   Team,
 } from "./types";
 import { store } from "../../store/store";
+import { api } from "./api";
 import {
   addNetworkSyncLog,
   setNetworkSyncConnected,
+  setNetworkSyncAuthenticated,
+  setDbPlayers,
+  dbPlayerIdByIgn,
 } from "../../store/observerSlice";
 
-/** Server contract — adjust here if the server protocol differs. */
-export const PROTOCOL = {
-  /** Event emitted for each observer switch. */
-  observerUpdateEvent: "observer:update",
-  /** Auth handshake keys. */
-  authTokenKey: "token" as const,
-  authTournamentKey: "tournamentId" as const,
-};
+/** How long to wait for ocrAuthSuccess before treating the connection as
+ *  failed. The query-param auth path does nothing on a bad tournament id
+ *  rather than emitting a rejection, so a hang here needs its own timeout —
+ *  mirrors the 15s timeout localized-input's Rust side uses for the same
+ *  reason. */
+const AUTH_TIMEOUT_MS = 15_000;
 
 type Resolved = { team: string | null; playerName: string | null };
 
-/** Resolve a uid against the Team Info roster (spec §4.4). */
+/** Resolve a uid against the Team Info roster — log/display enrichment only,
+ *  does not feed the network payload (that resolves by name against the
+ *  database player cache, independent of whether the roster is complete). */
 function resolveRoster(uid: string | null, teams: Team[]): Resolved {
   if (!uid) return { team: null, playerName: null };
   for (const t of teams) {
@@ -78,16 +84,28 @@ export class NetworkSyncManager {
   private config: NetworkSyncConfig | null = null;
   private teams: Team[] = [];
   private lastSig = new Map<string, string>();
+  private authTimer: ReturnType<typeof setTimeout> | null = null;
 
   private status(connected: boolean) {
     store.dispatch(setNetworkSyncConnected(connected));
+  }
+
+  private authenticated(value: boolean) {
+    store.dispatch(setNetworkSyncAuthenticated(value));
   }
 
   private log(level: "info" | "success" | "error", message: string) {
     store.dispatch(addNetworkSyncLog({ time: nowTime(), level, message }));
   }
 
-  /** Update the roster used to enrich payloads. */
+  private clearAuthTimer() {
+    if (this.authTimer) {
+      clearTimeout(this.authTimer);
+      this.authTimer = null;
+    }
+  }
+
+  /** Update the roster used to enrich log/display output. */
   setTeams(teams: Team[]) {
     this.teams = teams;
   }
@@ -96,8 +114,14 @@ export class NetworkSyncManager {
     return this.socket?.connected ?? false;
   }
 
-  /** Open the Socket.io connection. Validates config first. */
-  connect(config: NetworkSyncConfig): string | null {
+  get authenticatedNow(): boolean {
+    return store.getState().observer.networkSyncAuthenticated;
+  }
+
+  /** Open the Socket.io connection for a given source slot. Validates config
+   *  first. `sourceId` is always included — every real deployment is one
+   *  observer PC permanently paired to one output slot. */
+  connect(config: NetworkSyncConfig, sourceId: string): string | null {
     const err = validateConfig(config);
     if (err) {
       this.log("error", err);
@@ -107,19 +131,31 @@ export class NetworkSyncManager {
     this.config = config;
     this.lastSig.clear();
 
-    this.log("info", `Connecting to ${config.socketUrl}…`);
+    this.log("info", `Connecting to ${config.socketUrl} — Source ${sourceId}…`);
     const socket = io(config.socketUrl, {
       transports: ["websocket"],
       reconnection: true,
-      auth: {
-        [PROTOCOL.authTokenKey]: config.secretKey,
-        [PROTOCOL.authTournamentKey]: config.tournamentId,
+      query: {
+        ocrKey: config.secretKey,
+        tournamentId: config.tournamentId,
+        sourceId,
       },
     });
 
+    this.clearAuthTimer();
+    this.authTimer = setTimeout(() => {
+      if (!this.authenticatedNow) {
+        this.log(
+          "error",
+          "Auth timed out — server did not respond within 15s. Check the secret key and tournament ID.",
+        );
+        this.disconnect();
+      }
+    }, AUTH_TIMEOUT_MS);
+
     socket.on("connect", () => {
       this.status(true);
-      this.log("success", "Connected to server.");
+      this.log("info", "Socket connected — waiting for authentication…");
     });
     socket.on("disconnect", (reason) => {
       this.status(false);
@@ -135,12 +171,62 @@ export class NetworkSyncManager {
         auth ? `Auth failed: ${msg}` : `Connection error: ${msg}`,
       );
     });
+    socket.on(
+      "ocrAuthSuccess",
+      (data: { isSourceMode: boolean; sourceId: string | null }) => {
+        this.clearAuthTimer();
+        this.authenticated(true);
+        this.lastSig.clear();
+        const mode = data.isSourceMode
+          ? `source mode (Source ${data.sourceId})`
+          : "global mode";
+        this.log("success", `Authenticated — ${mode}`);
+
+        // Auto-fetch the database roster if it isn't cached yet, mirroring
+        // localized-input's auto-fetch-on-start — one fetch per session,
+        // not one per detection. A manual refetch stays available via
+        // TeamInfo's Fetch Players button.
+        if (store.getState().observer.dbPlayers.length === 0) {
+          api
+            .fetchPlayersFromServer()
+            .then((players) => {
+              store.dispatch(setDbPlayers(players));
+              this.log(
+                "success",
+                `Auto-fetched ${players.length} players from database`,
+              );
+            })
+            .catch((e) => {
+              this.log(
+                "error",
+                `Database auto-fetch failed: ${String(e)} — use Fetch Players in Team Info`,
+              );
+            });
+        }
+      },
+    );
+    socket.on("ocrAuthFailed", (data: { message?: string }) => {
+      this.clearAuthTimer();
+      this.authenticated(false);
+      this.log("error", `Auth rejected: ${data?.message ?? "unknown reason"}`);
+    });
+    socket.on("srcOcrConflict", (data: { chanId: string }) => {
+      // Non-blocking — the server always lets this connection take over the
+      // slot. A single flash right after (re)connect is expected (a
+      // just-stopped instance's socket hasn't timed out server-side yet); if
+      // it recurs, a second live instance is genuinely on this slot.
+      this.log(
+        "error",
+        `Another OCR app is already connected to ${data.chanId} — if this persists, check the other PC's slot.`,
+      );
+    });
 
     this.socket = socket;
     return null;
   }
 
   disconnect() {
+    this.clearAuthTimer();
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.disconnect();
@@ -149,9 +235,11 @@ export class NetworkSyncManager {
     }
   }
 
-  /** Forward an observer switch to the server (deduped by changed value). */
+  /** Forward an observer switch to the server, resolved to a database player
+   *  id (deduped by changed uid/name). Only sends once authenticated. */
   handle(update: ObserverUpdate) {
     if (!this.socket?.connected || !this.config) return;
+    if (!this.authenticatedNow) return;
     const co = update.currentObserver;
     if (!co) return;
     if (!co.uid && !co.name) return;
@@ -160,41 +248,32 @@ export class NetworkSyncManager {
     if (this.lastSig.get(update.observerId) === sig) return;
     this.lastSig.set(update.observerId, sig);
 
-    const { team, playerName } = resolveRoster(co.uid, this.teams);
-    const payload = {
-      tournamentId: this.config.tournamentId,
-      observerId: update.observerId,
-      uid: co.uid,
-      name: co.name,
-      playerId: co.playerId,
-      team,
-      playerName,
-      updatedAt: co.updatedAt,
-    };
+    const dbPlayers = store.getState().observer.dbPlayers;
+    const dbId = co.name
+      ? dbPlayerIdByIgn(dbPlayers).get(co.name.toLowerCase())
+      : undefined;
 
-    this.socket.emit(PROTOCOL.observerUpdateEvent, payload);
-    // Log UID/name only — never the secret.
-    this.log("success", `Sent ${co.uid ?? "—"} (${co.name ?? "—"})`);
+    // Log-only enrichment (team/playerName), independent of the resolution above.
+    const { team, playerName } = resolveRoster(co.uid, this.teams);
+
+    if (dbId) {
+      this.socket.emit("playerDetected", { playerId: dbId });
+      this.log(
+        "success",
+        `Sent playerDetected ${co.name} → ${dbId}${playerName ? ` (${team ?? "—"})` : ""}`,
+      );
+    } else {
+      this.socket.emit("noMatch");
+      this.log(
+        "info",
+        `No database match for "${co.name ?? co.uid}" — sent noMatch. Run Fetch Players if this is a real player.`,
+      );
+    }
   }
 }
 
 /** Shared singleton used by both the bootstrap wiring and the Network Sync page. */
 export const networkSync = new NetworkSyncManager();
-
-/** Test reachability/auth against the HTTP API (spec §4.3). */
-export async function testConnection(cfg: NetworkSyncConfig): Promise<string> {
-  const err = validateConfig(cfg);
-  if (err) throw new Error(err);
-  const base = cfg.apiBaseUrl.replace(/\/+$/, "");
-  const res = await fetch(`${base}/health`, {
-    method: "GET",
-    headers: { Authorization: `Bearer ${cfg.secretKey}` },
-  });
-  if (!res.ok) {
-    throw new Error(`Server responded ${res.status} ${res.statusText}`);
-  }
-  return `Server reachable (HTTP ${res.status}).`;
-}
 
 /** Pull the active NetworkSyncConfig out of settings. */
 export function configFromSettings(settings: AppSettings): NetworkSyncConfig {

@@ -19,6 +19,7 @@ import {
 import { useAppDispatch, useAppSelector } from "../store/hooks";
 import { setObservers, removeRuntime } from "../store/observerSlice";
 import { api } from "../lib/debugger/api";
+import { networkSync } from "../lib/debugger/networkSync";
 import type { ObserverConfig } from "../lib/debugger/types";
 import StatusBadge from "../components/StatusBadge";
 import ObserverModal from "../components/ObserverModal";
@@ -122,7 +123,24 @@ export default function Dashboard() {
   const runtime = useAppSelector((s) => s.observer.runtime);
   const teams = useAppSelector((s) => s.observer.settings?.teams ?? []);
   const syncOnline = useAppSelector((s) => s.observer.networkSyncConnected);
+  const networkSyncCfg = useAppSelector(
+    (s) => s.observer.settings?.networkSync,
+  );
   const [editing, setEditing] = useState(false);
+  const [configMessage, setConfigMessage] = useState<string | null>(null);
+  const [actionBusy, setActionBusy] = useState(false);
+
+  // Connect Network Sync alongside starting the observer, disconnect
+  // alongside stopping it — one action, both halves of "go live" together
+  // (mirrors localized-input's start_ocr/stop_ocr lifecycle).
+  const syncNetworkFor = (o: ObserverConfig, live: boolean) => {
+    if (live) {
+      if (networkSyncCfg?.enabled)
+        networkSync.connect(networkSyncCfg, o.sourceId);
+    } else {
+      networkSync.disconnect();
+    }
+  };
 
   // Single local observer model.
   const observer = observers[0];
@@ -143,27 +161,58 @@ export default function Dashboard() {
   };
 
   const saveObserver = async (o: ObserverConfig) => {
+    const wasConnected = syncOnline;
+    const slotChanged = observer && observer.sourceId !== o.sourceId;
     await api.upsertObserver(o);
     await refresh();
     if (o.enabled) await api.startObserver(o.id).catch(() => {});
+    // A slot change while connected has to reconnect with the new query
+    // params — the old connection is still registered under the old slot.
+    if (slotChanged && wasConnected) syncNetworkFor(o, true);
+    if (slotChanged) {
+      setConfigMessage(
+        wasConnected
+          ? `Slot changed to ${o.sourceId} — reconnecting…`
+          : `Slot saved (${o.sourceId})`,
+      );
+      setTimeout(() => setConfigMessage(null), 3500);
+    }
   };
 
   const toggleEnabled = async (o: ObserverConfig) => {
-    const updated = { ...o, enabled: !o.enabled };
-    await api.upsertObserver(updated);
-    await refresh();
-    if (updated.enabled) await api.startObserver(o.id).catch(() => {});
-    else {
-      await api.stopObserver(o.id).catch(() => {});
-      dispatch(removeRuntime(o.id));
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      const updated = { ...o, enabled: !o.enabled };
+      await api.upsertObserver(updated);
+      await refresh();
+      if (updated.enabled) {
+        await api.startObserver(o.id).catch(() => {});
+        syncNetworkFor(updated, true);
+      } else {
+        await api.stopObserver(o.id).catch(() => {});
+        dispatch(removeRuntime(o.id));
+        syncNetworkFor(updated, false);
+      }
+    } finally {
+      setActionBusy(false);
     }
   };
 
   const startStop = async (o: ObserverConfig, start: boolean) => {
-    if (start) await api.startObserver(o.id);
-    else {
-      await api.stopObserver(o.id);
-      dispatch(removeRuntime(o.id));
+    if (actionBusy) return;
+    setActionBusy(true);
+    try {
+      if (start) {
+        await api.startObserver(o.id);
+        syncNetworkFor(o, true);
+      } else {
+        await api.stopObserver(o.id);
+        dispatch(removeRuntime(o.id));
+        syncNetworkFor(o, false);
+      }
+    } finally {
+      setActionBusy(false);
     }
   };
 
@@ -391,6 +440,7 @@ export default function Dashboard() {
                 <input
                   type="checkbox"
                   checked={observer.enabled}
+                  disabled={actionBusy}
                   onChange={() => toggleEnabled(observer)}
                 />
                 <span className="slider" />
@@ -407,6 +457,7 @@ export default function Dashboard() {
                   <button
                     className="btn btn-danger"
                     onClick={() => startStop(observer, false)}
+                    disabled={actionBusy}
                   >
                     <CircleStop size={15} /> Stop
                   </button>
@@ -414,14 +465,28 @@ export default function Dashboard() {
                   <button
                     className="btn btn-success"
                     onClick={() => startStop(observer, true)}
+                    disabled={actionBusy}
                   >
                     <CirclePlay size={15} /> Start
                   </button>
                 ))}
 
+              {configMessage && (
+                <span
+                  style={{
+                    marginLeft: "auto",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    color: "var(--green)",
+                  }}
+                >
+                  {configMessage}
+                </span>
+              )}
+
               <button
                 className="btn btn-primary"
-                style={{ marginLeft: "auto" }}
+                style={{ marginLeft: configMessage ? 12 : "auto" }}
                 onClick={() => setEditing(true)}
               >
                 <Settings2 size={15} /> Configure

@@ -16,7 +16,6 @@ import {
 
 export function useBootstrap() {
   const dispatch = useAppDispatch();
-  const sync = useAppSelector((s) => s.observer.settings?.networkSync);
   const teams = useAppSelector((s) => s.observer.settings?.teams);
 
   // Keep the roster used for payload enrichment up to date.
@@ -24,16 +23,11 @@ export function useBootstrap() {
     networkSync.setTeams(teams ?? []);
   }, [teams]);
 
-  // Auto-connect / disconnect as the config changes (spec §4.5).
-  useEffect(() => {
-    if (!sync) return;
-    if (sync.enabled) {
-      if (!networkSync.connected) networkSync.connect(sync);
-    } else if (networkSync.connected) {
-      networkSync.disconnect();
-    }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [sync?.enabled, sync?.socketUrl, sync?.secretKey, sync?.tournamentId]);
+  // Network Sync connect/disconnect is NOT triggered here — it's tied to the
+  // Dashboard Start/Stop button (see Dashboard.tsx's startStop/toggleEnabled),
+  // same "one button = go live" lifecycle localized-input's start_ocr/stop_ocr
+  // uses. Auto-connecting at app launch would let a dedicated broadcast PC
+  // claim its source slot before the operator is actually ready to observe.
 
   useEffect(() => {
     let disposed = false;
@@ -66,10 +60,6 @@ export function useBootstrap() {
 
         // 4. Start local watches.
         await api.startAllObservers();
-
-        // 5. Auto-connect Network Sync if enabled.
-        if (settings.networkSync?.enabled)
-          networkSync.connect(settings.networkSync);
       } catch (err) {
         console.error("Bootstrap failed:", err);
       }

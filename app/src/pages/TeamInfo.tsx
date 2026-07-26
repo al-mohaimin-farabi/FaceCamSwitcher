@@ -10,7 +10,11 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
-import { setSettings } from "../store/observerSlice";
+import {
+  setSettings,
+  setDbPlayers,
+  dbPlayerIdByIgn,
+} from "../store/observerSlice";
 import { api } from "../lib/debugger/api";
 import type {
   AppSettings,
@@ -19,6 +23,25 @@ import type {
   Team,
   TeamPlayer,
 } from "../lib/debugger/types";
+
+/** Map a fetch_players_from_server error to operator-readable text — same
+ *  mapping localized-input's Settings.tsx uses for its Fetch Players button. */
+function friendlyDbFetchError(e: unknown): string {
+  const raw = String(e);
+  if (raw.includes("401"))
+    return "Invalid secret key — check Network Sync settings.";
+  if (raw.includes("404"))
+    return "Tournament not found — check the Tournament ID.";
+  if (raw.includes("403"))
+    return "Access denied — secret key not authorized for this tournament.";
+  if (raw.includes("Request failed") || raw.includes("error sending request"))
+    return "Cannot reach server — check API URL and Network Sync settings.";
+  if (raw.includes("Failed to parse"))
+    return "Server returned unexpected data.";
+  if (raw.includes("required"))
+    return "API URL, Tournament ID, and Secret Key must all be set in Network Sync first.";
+  return raw;
+}
 
 const MAIN_COUNT = 4;
 const TEAM_SIZE = 5; // 4 main + 1 substitute
@@ -48,8 +71,13 @@ function normalize(players: TeamPlayer[]): TeamPlayer[] {
 
 /** Build teams from fetched players: group by squad (playerId >> 24), then
  *  chunk each group into 4 main + 1 sub. Falls back to chunking everything by 5
- *  if the squad encoding isn't present. */
-function buildTeams(players: FetchedPlayer[]): Team[] {
+ *  if the squad encoding isn't present. `dbIdByIgn` cross-annotates each slot
+ *  with its resolved database id (name match, case-insensitive) when known —
+ *  QA visibility only; switch-time resolution matches by name independently. */
+function buildTeams(
+  players: FetchedPlayer[],
+  dbIdByIgn: Map<string, string>,
+): Team[] {
   const groups = new Map<number, FetchedPlayer[]>();
   for (const p of players) {
     const pid = parseInt(p.playerId, 10) || 0;
@@ -66,6 +94,7 @@ function buildTeams(players: FetchedPlayer[]): Team[] {
     uid: src?.uid ?? "",
     playerId: src?.playerId ?? "",
     role,
+    dbPlayerId: src?.name ? dbIdByIgn.get(src.name.toLowerCase()) : undefined,
   });
 
   const teams: Team[] = [];
@@ -90,6 +119,7 @@ export default function TeamInfo() {
   const dispatch = useAppDispatch();
   const settings = useAppSelector((s) => s.observer.settings);
   const runtime = useAppSelector((s) => s.observer.runtime);
+  const dbPlayers = useAppSelector((s) => s.observer.dbPlayers);
   const [copied, setCopied] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -177,8 +207,24 @@ export default function TeamInfo() {
       ) {
         return;
       }
-      await setTeams(buildTeams(players));
-      setStatus(`Fetched ${players.length} player(s) into teams.`);
+
+      // Also fetch + cache the database roster (saved for reuse, not
+      // re-fetched per detection) so built slots can be cross-annotated with
+      // their resolved database id. Non-fatal — debugger-based team building
+      // still works if this fails, it just won't have DB-match annotations yet.
+      let dbMap = dbPlayerIdByIgn(dbPlayers);
+      let dbNote = "";
+      try {
+        const dbFetched = await api.fetchPlayersFromServer();
+        dispatch(setDbPlayers(dbFetched));
+        dbMap = dbPlayerIdByIgn(dbFetched);
+        dbNote = ` (${dbFetched.length} database players matched)`;
+      } catch (e) {
+        dbNote = ` — database fetch failed: ${friendlyDbFetchError(e)}`;
+      }
+
+      await setTeams(buildTeams(players, dbMap));
+      setStatus(`Fetched ${players.length} player(s) into teams.${dbNote}`);
     } catch (e) {
       setStatus(String(e));
     } finally {
@@ -410,11 +456,26 @@ function PlayerRow({
         style={{
           display: "flex",
           alignItems: "center",
+          gap: 6,
           fontSize: 12,
           fontWeight: 600,
           color: accent ? "#facc15" : "var(--text-secondary)",
         }}
       >
+        <span
+          title={
+            p.dbPlayerId
+              ? "Matched to a database player"
+              : "No database match yet — run Fetch Players"
+          }
+          style={{
+            width: 7,
+            height: 7,
+            borderRadius: "50%",
+            flexShrink: 0,
+            background: p.dbPlayerId ? "#22c55e" : "var(--border)",
+          }}
+        />
         {label}
       </div>
       {cell("playerName", "Player name")}
