@@ -44,6 +44,11 @@ pub struct ObserverConfig {
     pub enabled: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub local_debugger_path: Option<String>,
+    /// Which vMix output slot ("01"/"02"/"03") this PC's detections report
+    /// into — a per-PC identity, not a network setting, since every real
+    /// deployment is one observer PC permanently paired to one slot.
+    #[serde(default = "default_source_id")]
+    pub source_id: String,
     #[serde(default)]
     pub created_at: String,
     #[serde(default)]
@@ -54,22 +59,8 @@ fn default_true() -> bool {
     true
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct UiPreferences {
-    #[serde(default = "default_true")]
-    pub animations: bool,
-    #[serde(default)]
-    pub compact_cards: bool,
-}
-
-impl Default for UiPreferences {
-    fn default() -> Self {
-        Self {
-            animations: true,
-            compact_cards: false,
-        }
-    }
+fn default_source_id() -> String {
+    "01".into()
 }
 
 /// Central server bridge configuration (spec §4.2).
@@ -153,12 +144,6 @@ pub struct AppSettings {
     pub debugger_folder: Option<String>,
     #[serde(default)]
     pub observers: Vec<ObserverConfig>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub last_selected_observer: Option<String>,
-    #[serde(default)]
-    pub debug_logging: bool,
-    #[serde(default)]
-    pub ui: UiPreferences,
     #[serde(default)]
     pub network_sync: NetworkSyncConfig,
     #[serde(default)]
@@ -330,28 +315,6 @@ fn upsert_observer(
     }
     persist_settings(&s)?;
     Ok(observer)
-}
-
-#[tauri::command]
-fn delete_observer(
-    id: String,
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<CommandResult, String> {
-    state.watch.stop(&id);
-    state.runtime.lock().unwrap().remove(&id);
-    {
-        let mut s = state.settings.lock().unwrap();
-        let before = s.observers.len();
-        s.observers.retain(|o| o.id != id);
-        if s.observers.len() == before {
-            return Err(format!("Observer '{id}' not found"));
-        }
-        persist_settings(&s)?;
-    }
-    Ok(CommandResult {
-        success: true,
-        message: "Observer deleted".into(),
-    })
 }
 
 // ── Watch control ────────────────────────────────────────────────────
@@ -526,7 +489,6 @@ pub fn run() {
     });
 
     tauri::Builder::default()
-        .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_dialog::init())
         .manage(app_state.clone())
         .setup(move |app| {
@@ -562,7 +524,6 @@ pub fn run() {
             set_debugger_folder,
             list_observers,
             upsert_observer,
-            delete_observer,
             start_observer,
             stop_observer,
             start_all_observers,

@@ -64,26 +64,50 @@ export default function NetworkSync() {
 
   return (
     <div className="page animate-fade-in">
-      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 22 }}>
+      <div
+        style={{
+          display: "flex",
+          justifyContent: "space-between",
+          alignItems: "flex-start",
+          marginBottom: 22,
+        }}
+      >
         <div>
           <div className="page-title">Network Sync</div>
           <div className="page-subtitle">
             Push detected observer data to the central server in real time.
           </div>
         </div>
-        <span className={`badge ${connected ? "badge-connected" : "badge-error"}`}>
+        <span
+          className={`badge ${connected ? "badge-connected" : "badge-error"}`}
+        >
           <span className="dot" /> {connected ? "Online" : "Offline"}
         </span>
       </div>
 
       {/* Enable + configuration */}
       <div className="glass-card" style={{ padding: 20, marginBottom: 18 }}>
-        <div className="section-header"><Globe size={14} /> Server Connection</div>
+        <div className="section-header">
+          <Globe size={14} /> Server Connection
+        </div>
 
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "8px 0 14px", borderBottom: "1px solid var(--border)", marginBottom: 16 }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+            padding: "8px 0 14px",
+            borderBottom: "1px solid var(--border)",
+            marginBottom: 16,
+          }}
+        >
           <div>
-            <div style={{ fontSize: 13.5, fontWeight: 600 }}>Network Sync Enabled</div>
-            <div style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}>
+            <div style={{ fontSize: 13.5, fontWeight: 600 }}>
+              Network Sync Enabled
+            </div>
+            <div
+              style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}
+            >
               Connects to the server via Socket.io when observing starts.
             </div>
           </div>
@@ -141,12 +165,21 @@ export default function NetworkSync() {
 
         <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
           {connected ? (
-            <button className="btn btn-danger" onClick={disconnect} disabled={busy}>
+            <button
+              className="btn btn-danger"
+              onClick={disconnect}
+              disabled={busy}
+            >
               <Plug size={15} /> Disconnect
             </button>
           ) : (
-            <button className="btn btn-success" onClick={connect} disabled={busy}>
-              {busy ? <span className="spinner" /> : <PlugZap size={15} />} Connect
+            <button
+              className="btn btn-success"
+              onClick={connect}
+              disabled={busy}
+            >
+              {busy ? <span className="spinner" /> : <PlugZap size={15} />}{" "}
+              Connect
             </button>
           )}
           <button className="btn btn-ghost" onClick={test} disabled={busy}>
@@ -154,26 +187,63 @@ export default function NetworkSync() {
           </button>
         </div>
 
-        {error && <div style={{ color: "var(--red)", fontSize: 12.5, marginTop: 12 }}>{error}</div>}
-        {testMsg && <div style={{ color: "var(--green)", fontSize: 12.5, marginTop: 12 }}>{testMsg}</div>}
+        {error && (
+          <div style={{ color: "var(--red)", fontSize: 12.5, marginTop: 12 }}>
+            {error}
+          </div>
+        )}
+        {testMsg && (
+          <div style={{ color: "var(--green)", fontSize: 12.5, marginTop: 12 }}>
+            {testMsg}
+          </div>
+        )}
       </div>
 
       {/* Live log */}
       <div className="glass-card" style={{ padding: 18 }}>
-        <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+        <div
+          style={{
+            display: "flex",
+            justifyContent: "space-between",
+            alignItems: "center",
+          }}
+        >
           <div className="section-header" style={{ marginBottom: 0 }}>
             <Radio size={14} /> Live Log ({log.length})
           </div>
-          <button className="btn btn-ghost btn-sm" onClick={() => dispatch(clearNetworkSyncLog())}>
+          <button
+            className="btn btn-ghost btn-sm"
+            onClick={() => dispatch(clearNetworkSyncLog())}
+          >
             <Trash2 size={13} /> Clear
           </button>
         </div>
-        <div style={{ maxHeight: 280, overflowY: "auto", marginTop: 12, display: "flex", flexDirection: "column", gap: 2 }}>
+        <div
+          style={{
+            maxHeight: 280,
+            overflowY: "auto",
+            marginTop: 12,
+            display: "flex",
+            flexDirection: "column",
+            gap: 2,
+          }}
+        >
           {log.length === 0 ? (
-            <div style={{ fontSize: 12.5, color: "var(--text-muted)", padding: "8px 0" }}>No activity yet.</div>
+            <div
+              style={{
+                fontSize: 12.5,
+                color: "var(--text-muted)",
+                padding: "8px 0",
+              }}
+            >
+              No activity yet.
+            </div>
           ) : (
             [...log].reverse().map((e, i) => (
-              <div key={i} className={`log-entry ${e.level === "success" ? "success" : e.level}`}>
+              <div
+                key={i}
+                className={`log-entry ${e.level === "success" ? "success" : e.level}`}
+              >
                 <span className="time">{e.time}</span>
                 <span className="msg">{e.message}</span>
               </div>

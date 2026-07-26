@@ -46,17 +46,20 @@ FaceCam/
 ## 🚀 Development Setup
 
 ### Prerequisites (Developer only)
+
 - Node.js (v18+)
 - Rust toolchain (via rustup)
 - Python 3.10+ with PaddleOCR dependencies
 
 ### Install Dependencies
+
 ```bash
 cd app
 npm install
 ```
 
 ### Run in Development Mode
+
 ```bash
 cd app
 npx tauri dev
@@ -65,22 +68,28 @@ npx tauri dev
 ## 📦 Building for Distribution
 
 ### Step 1: Bundle the Python backend
+
 ```bash
 cd FaceCam
 pip install pyinstaller
 python build_backend.py
 ```
+
 This creates `dist/FaceCam_Backend.exe`.
 
 ### Step 2: Build the Tauri app
+
 ```bash
 cd app
 npx tauri build
 ```
+
 This creates `Efinity FaceCam.exe` installer.
 
 ### Step 3: Distribute
+
 End users need:
+
 - `Efinity FaceCam.exe` (the main app)
 - `FaceCam_Backend.exe` (OCR engine — place next to the main exe)
 - `config.json` (auto-created on first run)
@@ -99,4 +108,4 @@ End users need:
 
 ---
 
-*Developed by themisuwu • Powered by PaddleOCR v3*
+_Developed by themisuwu • Powered by PaddleOCR v3_

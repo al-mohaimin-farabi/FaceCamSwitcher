@@ -57,7 +57,10 @@ export const observerSlice = createSlice({
     removeRuntime: (state, action: PayloadAction<string>) => {
       delete state.runtime[action.payload];
     },
-    setFolderValidation: (state, action: PayloadAction<FolderValidation | null>) => {
+    setFolderValidation: (
+      state,
+      action: PayloadAction<FolderValidation | null>,
+    ) => {
       state.folderValidation = action.payload;
     },
     setVersion: (state, action: PayloadAction<string>) => {

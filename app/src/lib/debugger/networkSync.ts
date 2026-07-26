@@ -130,7 +130,10 @@ export class NetworkSyncManager {
       // Never echo the secret; e.message is server-provided.
       const msg = e?.message ?? "connection error";
       const auth = /auth|unauthor|forbidden|token/i.test(msg);
-      this.log("error", auth ? `Auth failed: ${msg}` : `Connection error: ${msg}`);
+      this.log(
+        "error",
+        auth ? `Auth failed: ${msg}` : `Connection error: ${msg}`,
+      );
     });
 
     this.socket = socket;

@@ -23,11 +23,7 @@ export type ObserverConfig = {
 };
 
 export type ObserverStatus =
-  | "connected"
-  | "watching"
-  | "waiting"
-  | "error"
-  | "disabled";
+  "connected" | "watching" | "waiting" | "error" | "disabled";
 
 export type ObserverRuntimeState = {
   observerId: string;
@@ -44,11 +40,6 @@ export type ObserverUpdate = {
   currentObserver: CurrentObserverState | null;
   lastMessage?: string;
   lastHeartbeatAt: string;
-};
-
-export type UiPreferences = {
-  animations: boolean;
-  compactCards: boolean;
 };
 
 export type PlayerRole = "main" | "sub";
@@ -90,9 +81,6 @@ export type NetworkSyncLogEntry = {
 export type AppSettings = {
   debuggerFolder?: string;
   observers: ObserverConfig[];
-  lastSelectedObserver?: string;
-  debugLogging: boolean;
-  ui: UiPreferences;
   networkSync: NetworkSyncConfig;
   teams: Team[];
 };

@@ -111,10 +111,10 @@ Installer output: `app/src-tauri/target/release/bundle/nsis/FaceCam_0.2.0_x64-se
 
 ## Testing
 
-| Suite | Command | Covers |
-|-------|---------|--------|
-| Rust unit + integration | `cd app/src-tauri && cargo test` | parser, detector, watcher, fixtures |
-| Frontend typecheck/build | `cd app && npm run build` | TS types + bundle |
+| Suite                    | Command                          | Covers                              |
+| ------------------------ | -------------------------------- | ----------------------------------- |
+| Rust unit + integration  | `cd app/src-tauri && cargo test` | parser, detector, watcher, fixtures |
+| Frontend typecheck/build | `cd app && npm run build`        | TS types + bundle                   |
 
 Sample fixtures live in `app/src-tauri/tests/fixtures/`.
 
@@ -122,16 +122,16 @@ Sample fixtures live in `app/src-tauri/tests/fixtures/`.
 
 ## Tauri Commands (IPC surface)
 
-| Command | Purpose |
-|---------|---------|
-| `load_settings` / `save_settings` | Persisted settings (observers, folder, UI prefs) |
-| `detect_debugger_folder` | Auto-detect + candidate paths |
-| `validate_debugger_folder` / `set_debugger_folder` | Validate / save folder |
-| `list_observers` / `upsert_observer` / `delete_observer` | Observer CRUD |
-| `start_observer` / `stop_observer` / `start_all_observers` / `stop_all_observers` | Watch control |
-| `get_observer_states` | Runtime snapshot |
-| `fetch_players_from_debugger` | Parse latest file → players (auto-build Team Info) |
-| `app_version` | App version |
+| Command                                                                           | Purpose                                            |
+| --------------------------------------------------------------------------------- | -------------------------------------------------- |
+| `load_settings` / `save_settings`                                                 | Persisted settings (observers, folder, UI prefs)   |
+| `detect_debugger_folder`                                                          | Auto-detect + candidate paths                      |
+| `validate_debugger_folder` / `set_debugger_folder`                                | Validate / save folder                             |
+| `list_observers` / `upsert_observer` / `delete_observer`                          | Observer CRUD                                      |
+| `start_observer` / `stop_observer` / `start_all_observers` / `stop_all_observers` | Watch control                                      |
+| `get_observer_states`                                                             | Runtime snapshot                                   |
+| `fetch_players_from_debugger`                                                     | Parse latest file → players (auto-build Team Info) |
+| `app_version`                                                                     | App version                                        |
 
 **Events:** `observer_update` → `ObserverUpdate { … }`.
 

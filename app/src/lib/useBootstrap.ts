@@ -68,7 +68,8 @@ export function useBootstrap() {
         await api.startAllObservers();
 
         // 5. Auto-connect Network Sync if enabled.
-        if (settings.networkSync?.enabled) networkSync.connect(settings.networkSync);
+        if (settings.networkSync?.enabled)
+          networkSync.connect(settings.networkSync);
       } catch (err) {
         console.error("Bootstrap failed:", err);
       }

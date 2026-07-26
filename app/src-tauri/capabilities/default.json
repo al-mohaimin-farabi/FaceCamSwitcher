@@ -3,10 +3,5 @@
   "identifier": "default",
   "description": "FaceCam default capabilities",
   "windows": ["main"],
-  "permissions": [
-    "core:default",
-    "fs:default",
-    "dialog:default",
-    "core:window:allow-close"
-  ]
+  "permissions": ["core:default", "dialog:default", "core:window:allow-close"]
 }

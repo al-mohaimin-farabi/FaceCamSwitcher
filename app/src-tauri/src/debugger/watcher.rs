@@ -137,8 +137,10 @@ fn watch_loop(observer_id: String, folder: PathBuf, emit: EmitFn, stop: Arc<Atom
     // we throttle it. Appends to the *current* file are handled instantly on
     // every notify event via the hot path below — independent of this interval.
     const RESCAN_INTERVAL: Duration = Duration::from_millis(1000);
-    // Fallback wake-up in case a notify event is missed.
-    const FALLBACK_POLL: Duration = Duration::from_millis(500);
+    // Fallback wake-up in case a notify event is missed. Tightened from 500ms to
+    // bound worst-case detection latency under the ~100ms target — the common
+    // case (a real notify event) is already single-digit ms and unaffected.
+    const FALLBACK_POLL: Duration = Duration::from_millis(100);
 
     emit_status_if_changed(&observer_id, &emit, &mut state, ObserverStatus::Watching, "Watching folder");
 

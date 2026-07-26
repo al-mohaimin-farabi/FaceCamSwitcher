@@ -28,10 +28,9 @@ export const api = {
   listObservers: () => invoke<ObserverConfig[]>("list_observers"),
   upsertObserver: (observer: ObserverConfig) =>
     invoke<ObserverConfig>("upsert_observer", { observer }),
-  deleteObserver: (id: string) =>
-    invoke<CommandResult>("delete_observer", { id }),
 
-  startObserver: (id: string) => invoke<CommandResult>("start_observer", { id }),
+  startObserver: (id: string) =>
+    invoke<CommandResult>("start_observer", { id }),
   stopObserver: (id: string) => invoke<CommandResult>("stop_observer", { id }),
   startAllObservers: () => invoke<CommandResult>("start_all_observers"),
   stopAllObservers: () => invoke<CommandResult>("stop_all_observers"),

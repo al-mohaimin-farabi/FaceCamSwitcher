@@ -1,9 +1,5 @@
 import { useState } from "react";
-import {
-  LayoutDashboard,
-  Globe,
-  IdCard,
-} from "lucide-react";
+import { LayoutDashboard, Globe, IdCard } from "lucide-react";
 import Dashboard from "./pages/Dashboard";
 import TeamInfo from "./pages/TeamInfo";
 import NetworkSync from "./pages/NetworkSync";
@@ -27,21 +23,51 @@ function App() {
     <div className="app-shell gradient-bg">
       {/* ── Sidebar ─────────────────────────────── */}
       <aside className="sidebar">
-        <div style={{ display: "flex", alignItems: "center", gap: 11, padding: "6px 8px 18px" }}>
+        <div
+          style={{
+            display: "flex",
+            alignItems: "center",
+            gap: 11,
+            padding: "6px 8px 18px",
+          }}
+        >
           <div
             style={{
-              width: 38, height: 38, borderRadius: 11, background: "#080B14",
-              border: "1px solid rgba(255,255,255,0.08)", display: "flex",
-              alignItems: "center", justifyContent: "center", overflow: "hidden",
+              width: 38,
+              height: 38,
+              borderRadius: 11,
+              background: "#080B14",
+              border: "1px solid rgba(255,255,255,0.08)",
+              display: "flex",
+              alignItems: "center",
+              justifyContent: "center",
+              overflow: "hidden",
             }}
           >
             <img src="/logo.svg" alt="Logo" style={{ width: 24, height: 24 }} />
           </div>
           <div>
-            <div style={{ fontSize: 15, fontWeight: 800, background: "linear-gradient(135deg,#60a5fa,#a78bfa)", WebkitBackgroundClip: "text", WebkitTextFillColor: "transparent", lineHeight: 1.1 }}>
+            <div
+              style={{
+                fontSize: 15,
+                fontWeight: 800,
+                background: "linear-gradient(135deg,#60a5fa,#a78bfa)",
+                WebkitBackgroundClip: "text",
+                WebkitTextFillColor: "transparent",
+                lineHeight: 1.1,
+              }}
+            >
               FaceCam
             </div>
-            <div style={{ fontSize: 10.5, color: "var(--text-muted)", fontWeight: 500 }}>PCOB Observer</div>
+            <div
+              style={{
+                fontSize: 10.5,
+                color: "var(--text-muted)",
+                fontWeight: 500,
+              }}
+            >
+              PCOB Observer
+            </div>
           </div>
         </div>
 
@@ -52,13 +78,22 @@ function App() {
               className={`nav-item ${page === n.id ? "active" : ""}`}
               onClick={() => setPage(n.id)}
             >
-              <span className="nav-icon" style={{ display: "flex" }}>{n.icon}</span>
+              <span className="nav-icon" style={{ display: "flex" }}>
+                {n.icon}
+              </span>
               {n.label}
             </button>
           ))}
         </nav>
 
-        <div style={{ marginTop: "auto", padding: "12px 10px 4px", fontSize: 11, color: "var(--text-muted)" }}>
+        <div
+          style={{
+            marginTop: "auto",
+            padding: "12px 10px 4px",
+            fontSize: 11,
+            color: "var(--text-muted)",
+          }}
+        >
           v{version} · by themisuwu
         </div>
       </aside>
