@@ -57,18 +57,19 @@ export type TeamPlayer = {
   dbPlayerId?: string;
 };
 
-export type FetchedPlayer = {
-  uid: string;
-  name: string;
-  playerId: string;
-};
-
-/** A player as recorded in the FaceCam tournament database — distinct from
- *  FetchedPlayer, which comes from the live debugger log. */
+/** A player as recorded in the FaceCam tournament database — the single
+ *  source Team Info's roster is built from (uid resolves live switches,
+ *  teamId/teamName group players into the tournament's real teams). */
 export type DbPlayer = {
   id: string;
   ign: string;
+  uid: string;
+  /** False for a registered substitute — no stream key, can never actually
+   *  go live on the output page regardless of whether they're detected. */
+  isActive: boolean;
   playerNumber?: number | null;
+  teamId: string;
+  teamName: string;
 };
 
 export type Team = {
@@ -78,7 +79,6 @@ export type Team = {
 };
 
 export type NetworkSyncConfig = {
-  enabled: boolean;
   apiBaseUrl: string;
   socketUrl: string;
   tournamentId: string;

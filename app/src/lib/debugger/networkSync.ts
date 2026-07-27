@@ -24,7 +24,7 @@ import {
   setNetworkSyncConnected,
   setNetworkSyncAuthenticated,
   setDbPlayers,
-  dbPlayerIdByIgn,
+  resolveDbPlayerId,
 } from "../../store/observerSlice";
 
 /** How long to wait for ocrAuthSuccess before treating the connection as
@@ -75,7 +75,7 @@ export function validateConfig(cfg: NetworkSyncConfig): string | null {
   return null;
 }
 
-function nowTime() {
+export function nowTime() {
   return new Date().toLocaleTimeString("en-US", { hour12: false });
 }
 
@@ -127,7 +127,7 @@ export class NetworkSyncManager {
       this.log("error", err);
       return err;
     }
-    this.disconnect();
+    this.disconnect("Reconnecting — closing previous connection first");
     this.config = config;
     this.lastSig.clear();
 
@@ -149,7 +149,7 @@ export class NetworkSyncManager {
           "error",
           "Auth timed out — server did not respond within 15s. Check the secret key and tournament ID.",
         );
-        this.disconnect();
+        this.disconnect("Connection closed — auth timeout");
       }
     }, AUTH_TIMEOUT_MS);
 
@@ -182,10 +182,67 @@ export class NetworkSyncManager {
           : "global mode";
         this.log("success", `Authenticated — ${mode}`);
 
+        // Replay the currently-known observer state, if any, once the
+        // database roster is available. The debugger watcher only emits
+        // observer_update on a NEW switch, never on a timer — so if a
+        // switch already happened (or was already active) before this
+        // connection finished authenticating, handle() dropped it silently
+        // (correctly — auth wasn't confirmed yet) and nothing else would
+        // ever resend it. Without this replay, the server (and therefore
+        // the output page) could sit on the wrong player until the next
+        // real in-game switch.
+        // Reads the authoritative state from the Rust backend rather than
+        // Redux: on Start the watcher runs on its own thread and has to read
+        // and parse the whole debugger file, which takes noticeably longer
+        // than the socket takes to authenticate on a LAN. Redux is therefore
+        // still empty at this point (Stop cleared it), so a Redux-only replay
+        // silently found nothing and gave up forever. Retries briefly to
+        // cover exactly that window — whichever finishes first, the current
+        // detection always gets sent.
+        const replayCurrentState = async () => {
+          const attemptDelaysMs = [0, 150, 400, 800, 1500, 2500];
+          for (const delay of attemptDelaysMs) {
+            if (delay) await new Promise((r) => setTimeout(r, delay));
+            // Bail out if the connection dropped or a newer one replaced it.
+            if (!this.socket?.connected || !this.authenticatedNow) return;
+            // A real switch arriving on its own already sent it — nothing
+            // left to replay.
+            if (this.lastSig.size > 0) return;
+
+            const observerId = store.getState().observer.observers[0]?.id;
+            if (!observerId) continue;
+
+            let states: ObserverUpdate[] = [];
+            try {
+              states = await api.getObserverStates();
+            } catch {
+              continue;
+            }
+            const rt = states.find((s) => s.observerId === observerId);
+            if (rt?.currentObserver) {
+              this.log("info", "Replaying current detection after connect");
+              this.handle({
+                ...rt,
+                lastHeartbeatAt: rt.lastHeartbeatAt ?? nowTime(),
+              });
+              return;
+            }
+          }
+          this.log(
+            "info",
+            "No detection to replay yet — waiting for the next observer switch",
+          );
+        };
+
         // Auto-fetch the database roster if it isn't cached yet, mirroring
         // localized-input's auto-fetch-on-start — one fetch per session,
-        // not one per detection. A manual refetch stays available via
-        // TeamInfo's Fetch Players button.
+        // not one per detection. This only feeds switch-time matching
+        // (dbPlayers); Team Info's own roster is never built automatically —
+        // that only ever happens via an explicit Fetch Players click on that
+        // page. The replay above must wait for this to settle first — on a
+        // fresh start dbPlayers is empty, and resolving the replay against
+        // an empty cache would send a false noMatch for a player who
+        // actually has a database match.
         if (store.getState().observer.dbPlayers.length === 0) {
           api
             .fetchPlayersFromServer()
@@ -201,7 +258,10 @@ export class NetworkSyncManager {
                 "error",
                 `Database auto-fetch failed: ${String(e)} — use Fetch Players in Team Info`,
               );
-            });
+            })
+            .finally(replayCurrentState);
+        } else {
+          replayCurrentState();
         }
       },
     );
@@ -225,33 +285,70 @@ export class NetworkSyncManager {
     return null;
   }
 
-  disconnect() {
+  /** `reason` is logged only when there was actually a live socket to tear
+   *  down — calling disconnect() when already disconnected stays silent, so
+   *  the log isn't spammed on every redundant call. Every caller (explicit
+   *  Stop, the manual test button, an auth timeout, connect()'s own
+   *  tear-down-before-reconnect, app shutdown) passes its own reason so a
+   *  drop is never a silent mystery in the Live Log. */
+  disconnect(reason = "Disconnected") {
     this.clearAuthTimer();
     if (this.socket) {
       this.socket.removeAllListeners();
       this.socket.disconnect();
       this.socket = null;
       this.status(false);
+      this.log("info", reason);
     }
   }
 
   /** Forward an observer switch to the server, resolved to a database player
    *  id (deduped by changed uid/name). Only sends once authenticated. */
   handle(update: ObserverUpdate) {
-    if (!this.socket?.connected || !this.config) return;
-    if (!this.authenticatedNow) return;
+    // Every path below logs its outcome. A detection silently going nowhere
+    // is the single hardest thing to diagnose during a live event — "nothing
+    // in the log" must always mean "the watcher never saw a switch", never
+    // "it saw one and quietly dropped it here".
     const co = update.currentObserver;
-    if (!co) return;
-    if (!co.uid && !co.name) return;
+    const who = co ? (co.name ?? co.uid ?? "unknown") : null;
+
+    if (!this.socket?.connected || !this.config) {
+      if (who) this.log("info", `Detected ${who} — not sent (not connected)`);
+      return;
+    }
+    if (!this.authenticatedNow) {
+      this.log(
+        "info",
+        `Detected ${who ?? "a switch"} — not sent (waiting for authentication)`,
+      );
+      return;
+    }
+    if (!co) {
+      this.log("info", "Observer cleared — nothing to send");
+      return;
+    }
+    if (!co.uid && !co.name) {
+      this.log(
+        "error",
+        "Switch detected but the debugger line had no uid or name — nothing to match on",
+      );
+      return;
+    }
 
     const sig = `${co.uid ?? ""}|${co.name ?? ""}`;
-    if (this.lastSig.get(update.observerId) === sig) return;
+    if (this.lastSig.get(update.observerId) === sig) {
+      this.log("info", `${who} already sent — skipped (no change)`);
+      return;
+    }
     this.lastSig.set(update.observerId, sig);
 
+    // Two-tier resolution: uid first (exact, can't drift), name only as a
+    // fallback when uid is missing from this log line or isn't in the
+    // roster — the game's display name and the database's registered name
+    // are known to diverge, so name is never checked first.
     const dbPlayers = store.getState().observer.dbPlayers;
-    const dbId = co.name
-      ? dbPlayerIdByIgn(dbPlayers).get(co.name.toLowerCase())
-      : undefined;
+    const { id: dbId, via: viaTier } = resolveDbPlayerId(co, dbPlayers);
+    const via = viaTier === "name" ? "name fallback" : viaTier;
 
     // Log-only enrichment (team/playerName), independent of the resolution above.
     const { team, playerName } = resolveRoster(co.uid, this.teams);
@@ -260,13 +357,13 @@ export class NetworkSyncManager {
       this.socket.emit("playerDetected", { playerId: dbId });
       this.log(
         "success",
-        `Sent playerDetected ${co.name} → ${dbId}${playerName ? ` (${team ?? "—"})` : ""}`,
+        `Sent playerDetected ${co.name ?? co.uid} → ${dbId} (via ${via})${playerName ? ` — ${team ?? "—"}` : ""}`,
       );
     } else {
-      this.socket.emit("noMatch");
+      this.socket.emit("noMatch", {});
       this.log(
         "info",
-        `No database match for "${co.name ?? co.uid}" — sent noMatch. Run Fetch Players if this is a real player.`,
+        `No database match for "${co.name ?? co.uid}" (uid: ${co.uid ?? "—"}) — sent noMatch. Run Fetch Players if this is a real player.`,
       );
     }
   }

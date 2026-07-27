@@ -115,16 +115,59 @@ export const {
 
 export default observerSlice.reducer;
 
-// ── Derived lookup ────────────────────────────────────────────────────
+// ── Derived lookups ───────────────────────────────────────────────────
 // Built once per `dbPlayers` reference change (only changes via setDbPlayers,
 // i.e. once per fetch — not per detection), not recomputed on every access.
-let cachedFor: DbPlayer[] | null = null;
-let cachedMap: Map<string, string> = new Map();
+let cachedIgnFor: DbPlayer[] | null = null;
+let cachedIgnMap: Map<string, string> = new Map();
 
-/** Lowercase ign -> database player id, for O(1) switch-time resolution. */
+/** Lowercase ign -> database player id — fallback tier, tried only when uid
+ *  isn't available or doesn't match (game display name and the database's
+ *  registered name can drift; uid can't). Not filtered by isActive — the
+ *  app has no reliable, real-time way to know if an admin just flipped that
+ *  flag, so it resolves whoever matches and lets the server decide whether
+ *  they're actually live (it checks real mediasoup producer state, which is
+ *  always fresh — see ocr.handler.js's playerDetected handler). Filtering
+ *  here on a stale cached flag would silently break a just-reactivated
+ *  substitute until the next manual re-fetch — worse than the no-op it was
+ *  meant to prevent. */
 export function dbPlayerIdByIgn(players: DbPlayer[]): Map<string, string> {
-  if (cachedFor === players) return cachedMap;
-  cachedMap = new Map(players.map((p) => [p.ign.toLowerCase(), p.id]));
-  cachedFor = players;
-  return cachedMap;
+  if (cachedIgnFor === players) return cachedIgnMap;
+  cachedIgnMap = new Map(players.map((p) => [p.ign.toLowerCase(), p.id]));
+  cachedIgnFor = players;
+  return cachedIgnMap;
+}
+
+let cachedUidFor: DbPlayer[] | null = null;
+let cachedUidMap: Map<string, string> = new Map();
+
+/** uid -> database player id — primary match tier, for O(1) switch-time
+ *  resolution. Exact, not fuzzy: a Free Fire uid is a stable identifier.
+ *  Not filtered by isActive — see dbPlayerIdByIgn. */
+export function dbPlayerIdByUid(players: DbPlayer[]): Map<string, string> {
+  if (cachedUidFor === players) return cachedUidMap;
+  cachedUidMap = new Map(
+    players.filter((p) => p.uid).map((p) => [p.uid, p.id]),
+  );
+  cachedUidFor = players;
+  return cachedUidMap;
+}
+
+/** Resolve a live detection (uid/name) to a database player id — uid first
+ *  (exact, stable), name only as a fallback. Shared by switch-time matching
+ *  (networkSync.ts's handle()) and the Dashboard's live display, so both
+ *  always agree on the same resolution for the same detection. */
+export function resolveDbPlayerId(
+  co: { uid?: string | null; name?: string | null },
+  players: DbPlayer[],
+): { id: string | undefined; via: "uid" | "name" | null } {
+  if (co.uid) {
+    const id = dbPlayerIdByUid(players).get(co.uid);
+    if (id) return { id, via: "uid" };
+  }
+  if (co.name) {
+    const id = dbPlayerIdByIgn(players).get(co.name.toLowerCase());
+    if (id) return { id, via: "name" };
+  }
+  return { id: undefined, via: null };
 }

@@ -16,22 +16,16 @@ use serde::{Deserialize, Serialize};
 use tauri::{AppHandle, Emitter, Manager};
 
 use debugger::detector::{self, FolderValidation};
-use debugger::parser::ObserverParser;
 use debugger::state::ObserverUpdate;
 use debugger::watcher::{EmitFn, WatchManager};
 
 // ── Persistent settings model (spec §7, §11) ────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
 pub enum ObserverConnectionType {
+    #[default]
     Local,
-}
-
-impl Default for ObserverConnectionType {
-    fn default() -> Self {
-        ObserverConnectionType::Local
-    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -68,8 +62,6 @@ fn default_source_id() -> String {
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct NetworkSyncConfig {
-    #[serde(default)]
-    pub enabled: bool,
     #[serde(default = "default_api_base_url")]
     pub api_base_url: String,
     #[serde(default = "default_socket_url")]
@@ -90,7 +82,6 @@ fn default_socket_url() -> String {
 impl Default for NetworkSyncConfig {
     fn default() -> Self {
         Self {
-            enabled: false,
             api_base_url: default_api_base_url(),
             socket_url: default_socket_url(),
             tournament_id: String::new(),
@@ -99,17 +90,12 @@ impl Default for NetworkSyncConfig {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize, PartialEq, Eq, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum PlayerRole {
+    #[default]
     Main,
     Sub,
-}
-
-impl Default for PlayerRole {
-    fn default() -> Self {
-        PlayerRole::Main
-    }
 }
 
 /// One player slot within a team.
@@ -380,6 +366,10 @@ fn stop_observer(
     state: tauri::State<'_, Arc<AppState>>,
 ) -> Result<CommandResult, String> {
     state.watch.stop(&id);
+    // Drop the last-detected player along with the watcher — otherwise a
+    // stopped observer's stale state can be handed back to the frontend by
+    // get_observer_states() (e.g. on a webview reload) as if it were live.
+    state.runtime.lock().unwrap().remove(&id);
     Ok(CommandResult {
         success: true,
         message: "Observer stopped".into(),
@@ -413,6 +403,7 @@ fn start_all_observers(
 #[tauri::command]
 fn stop_all_observers(state: tauri::State<'_, Arc<AppState>>) -> Result<CommandResult, String> {
     state.watch.stop_all();
+    state.runtime.lock().unwrap().clear();
     Ok(CommandResult {
         success: true,
         message: "All observers stopped".into(),
@@ -431,70 +422,30 @@ fn app_version() -> Result<String, String> {
     Ok(env!("CARGO_PKG_VERSION").to_string())
 }
 
-#[derive(Serialize)]
-#[serde(rename_all = "camelCase")]
-struct FetchedPlayer {
-    uid: String,
-    name: String,
-    player_id: String,
-}
-
-/// Parse the latest debugger file and return every player resolved to a uid,
-/// so the Team Info roster can be auto-built (spec: Fetch Players).
-#[tauri::command]
-fn fetch_players_from_debugger(
-    state: tauri::State<'_, Arc<AppState>>,
-) -> Result<Vec<FetchedPlayer>, String> {
-    let folder = state
-        .settings
-        .lock()
-        .unwrap()
-        .debugger_folder
-        .clone()
-        .ok_or("No debugger folder configured. Set it in Debugger Source first.")?;
-
-    let latest = detector::latest_file(&PathBuf::from(&folder))
-        .ok_or("No debugger file found in the folder yet.")?;
-    let file_name = latest
-        .file_name()
-        .and_then(|n| n.to_str())
-        .unwrap_or("debugger")
-        .to_string();
-    let content = std::fs::read_to_string(&latest)
-        .map_err(|e| format!("Cannot read debugger file: {e}"))?;
-
-    let mut parser = ObserverParser::new(file_name);
-    for line in content.lines() {
-        parser.process_line(line);
-    }
-
-    let mut players: Vec<FetchedPlayer> = parser
-        .known_players()
-        .into_iter()
-        .map(|(uid, player_id, name)| FetchedPlayer {
-            uid,
-            name,
-            player_id,
-        })
-        .collect();
-    // Sort by numeric playerId so squads/slots come out in order.
-    players.sort_by_key(|p| p.player_id.parse::<u64>().unwrap_or(u64::MAX));
-    Ok(players)
-}
-
 // ── Database player fetch (Network Sync) ────────────────────────────
 
-/// A player as recorded in the FaceCam tournament database — distinct from
-/// [`FetchedPlayer`], which comes from the live debugger log. The database
-/// knows `id`/`ign`/`playerNumber`; it has no idea about Free Fire's own
-/// `uid`/`playerId` — those only ever appear in the debugger stream.
+/// A player as recorded in the FaceCam tournament database — this is now the
+/// single source Team Info builds its roster from (previously built from the
+/// live debugger log; replaced since the database already has real team
+/// grouping and the correct registered `uid`/`ign`, no guessing needed).
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct DbPlayer {
     pub id: String,
     pub ign: String,
     #[serde(default)]
+    pub uid: String,
+    /// False for a registered substitute — they have no stream key, so they
+    /// can never actually be switched to on the output page regardless of
+    /// whether they're detected.
+    #[serde(default = "default_true")]
+    pub is_active: bool,
+    #[serde(default)]
     pub player_number: Option<i32>,
+    #[serde(default)]
+    pub team_id: String,
+    #[serde(default)]
+    pub team_name: String,
 }
 
 #[derive(Deserialize)]
@@ -643,7 +594,6 @@ pub fn run() {
             stop_all_observers,
             get_observer_states,
             app_version,
-            fetch_players_from_debugger,
             fetch_players_from_server,
             check_server_health,
         ])

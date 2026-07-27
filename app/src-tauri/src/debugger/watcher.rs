@@ -115,15 +115,14 @@ impl WatchState {
 fn watch_loop(observer_id: String, folder: PathBuf, emit: EmitFn, stop: Arc<AtomicBool>) {
     let (tx, rx) = mpsc::channel::<()>();
 
-    // notify watcher — pings the channel on any filesystem change.
-    let mut fs_watcher = match notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
+    // notify watcher — pings the channel on any filesystem change. `.ok()`
+    // folds a failed watcher into `None`, falling back to pure polling.
+    let mut fs_watcher = notify::recommended_watcher(move |res: notify::Result<notify::Event>| {
         if res.is_ok() {
             let _ = tx.send(());
         }
-    }) {
-        Ok(w) => Some(w),
-        Err(_) => None, // fall back to pure polling
-    };
+    })
+    .ok();
 
     if let Some(w) = fs_watcher.as_mut() {
         // NonRecursive: the debugger folder is flat.

@@ -1,18 +1,13 @@
 import { useEffect, useState } from "react";
-import {
-  Radio,
-  PlugZap,
-  Plug,
-  Send,
-  Trash2,
-  Globe,
-  Wifi,
-  WifiOff,
-} from "lucide-react";
+import { Radio, Send, Trash2, Globe } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
-import { setSettings, clearNetworkSyncLog } from "../store/observerSlice";
+import {
+  setSettings,
+  clearNetworkSyncLog,
+  addNetworkSyncLog,
+} from "../store/observerSlice";
 import { api } from "../lib/debugger/api";
-import { networkSync, validateConfig } from "../lib/debugger/networkSync";
+import { nowTime } from "../lib/debugger/networkSync";
 import type { AppSettings, NetworkSyncConfig } from "../lib/debugger/types";
 
 export default function NetworkSync() {
@@ -26,17 +21,16 @@ export default function NetworkSync() {
   const log = useAppSelector((s) => s.observer.networkSyncLog);
 
   const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [testMsg, setTestMsg] = useState<string | null>(null);
   const [serverOnline, setServerOnline] = useState<boolean | null>(null);
 
   const cfg = settings?.networkSync;
   const sourceId = observers[0]?.sourceId || "01";
 
-  // Ping /api/health every 15s while enabled — same cadence localized-input's
-  // Settings.tsx uses, via Rust reqwest so there's no CORS question.
+  // Ping /api/health every 15s so this page has a passive read on server
+  // reachability without ever touching the real connection — that stays
+  // entirely owned by Dashboard's Start/Stop.
   useEffect(() => {
-    if (!cfg?.enabled || !cfg.apiBaseUrl) {
+    if (!cfg?.apiBaseUrl) {
       setServerOnline(null);
       return;
     }
@@ -55,7 +49,7 @@ export default function NetworkSync() {
       cancelled = true;
       clearInterval(interval);
     };
-  }, [cfg?.enabled, cfg?.apiBaseUrl]);
+  }, [cfg?.apiBaseUrl]);
 
   if (!settings || !cfg) return <div className="page">Loading…</div>;
 
@@ -68,32 +62,31 @@ export default function NetworkSync() {
     await api.saveSettings(next);
   };
 
-  const connect = async () => {
-    setError(null);
-    const err = validateConfig(cfg);
-    if (err) return setError(err);
-    setBusy(true);
-    try {
-      networkSync.connect(cfg, sourceId);
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const disconnect = () => {
-    networkSync.disconnect();
-  };
-
+  // Reachability only — never opens a real OCR session or claims the
+  // source slot. Going live is Dashboard's Start button, exclusively.
+  // Result goes to the shared Live Log, same as every other status event on
+  // this page, rather than a separate inline message nothing else reads.
   const test = async () => {
-    setError(null);
-    setTestMsg(null);
     setBusy(true);
     try {
       const result = await api.checkServerHealth();
-      if (result.success) setTestMsg(result.message);
-      else setError(result.message);
+      dispatch(
+        addNetworkSyncLog({
+          time: nowTime(),
+          level: result.success ? "success" : "error",
+          message: result.success
+            ? `Test Connection: ${result.message}`
+            : `Test Connection failed: ${result.message}`,
+        }),
+      );
     } catch (e) {
-      setError(String(e instanceof Error ? e.message : e));
+      dispatch(
+        addNetworkSyncLog({
+          time: nowTime(),
+          level: "error",
+          message: `Test Connection failed: ${String(e instanceof Error ? e.message : e)}`,
+        }),
+      );
     } finally {
       setBusy(false);
     }
@@ -128,8 +121,9 @@ export default function NetworkSync() {
           )}
           <span
             className={`badge ${authenticated ? "badge-connected" : connected ? "badge-waiting" : "badge-error"}`}
+            title="Live OCR connection, driven by Dashboard's Start/Stop"
           >
-            <span className="dot" />{" "}
+            <span className="dot" /> Sync{" "}
             {authenticated
               ? "Authenticated"
               : connected
@@ -139,42 +133,10 @@ export default function NetworkSync() {
         </div>
       </div>
 
-      {/* Enable + configuration */}
+      {/* Configuration */}
       <div className="glass-card" style={{ padding: 20, marginBottom: 18 }}>
         <div className="section-header">
           <Globe size={14} /> Server Connection
-        </div>
-
-        <div
-          style={{
-            display: "flex",
-            justifyContent: "space-between",
-            alignItems: "center",
-            padding: "8px 0 14px",
-            borderBottom: "1px solid var(--border)",
-            marginBottom: 16,
-          }}
-        >
-          <div>
-            <div style={{ fontSize: 13.5, fontWeight: 600 }}>
-              Network Sync Enabled
-            </div>
-            <div
-              style={{ fontSize: 12, color: "var(--text-muted)", marginTop: 2 }}
-            >
-              Connects via Socket.io when you press Start on the Dashboard — not
-              on app launch, so this PC doesn't claim Source {sourceId}
-              before you're ready to observe.
-            </div>
-          </div>
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={cfg.enabled}
-              onChange={(e) => persist({ enabled: e.target.checked })}
-            />
-            <span className="slider" />
-          </label>
         </div>
 
         <div className="field">
@@ -220,39 +182,11 @@ export default function NetworkSync() {
         </div>
 
         <div style={{ display: "flex", gap: 10, marginTop: 6 }}>
-          {connected ? (
-            <button
-              className="btn btn-danger"
-              onClick={disconnect}
-              disabled={busy}
-            >
-              <Plug size={15} /> Disconnect
-            </button>
-          ) : (
-            <button
-              className="btn btn-success"
-              onClick={connect}
-              disabled={busy}
-            >
-              {busy ? <span className="spinner" /> : <PlugZap size={15} />}{" "}
-              Connect (manual test)
-            </button>
-          )}
           <button className="btn btn-ghost" onClick={test} disabled={busy}>
-            <Send size={15} /> Test Connection
+            {busy ? <span className="spinner" /> : <Send size={15} />} Test
+            Connection
           </button>
         </div>
-
-        {error && (
-          <div style={{ color: "var(--red)", fontSize: 12.5, marginTop: 12 }}>
-            {error}
-          </div>
-        )}
-        {testMsg && (
-          <div style={{ color: "var(--green)", fontSize: 12.5, marginTop: 12 }}>
-            {testMsg}
-          </div>
-        )}
       </div>
 
       {/* Live log */}

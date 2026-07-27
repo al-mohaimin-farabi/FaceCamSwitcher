@@ -10,15 +10,11 @@ import {
   ChevronRight,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
-import {
-  setSettings,
-  setDbPlayers,
-  dbPlayerIdByIgn,
-} from "../store/observerSlice";
+import { setSettings, setDbPlayers } from "../store/observerSlice";
 import { api } from "../lib/debugger/api";
+import { buildTeamsFromDb } from "../lib/debugger/roster";
 import type {
   AppSettings,
-  FetchedPlayer,
   PlayerRole,
   Team,
   TeamPlayer,
@@ -45,6 +41,7 @@ function friendlyDbFetchError(e: unknown): string {
 
 const MAIN_COUNT = 4;
 const TEAM_SIZE = 5; // 4 main + 1 substitute
+const EMPTY_TEAMS: Team[] = [];
 
 function rid(prefix: string) {
   return `${prefix}-${Math.random().toString(36).slice(2, 10)}`;
@@ -69,57 +66,10 @@ function normalize(players: TeamPlayer[]): TeamPlayer[] {
   return out;
 }
 
-/** Build teams from fetched players: group by squad (playerId >> 24), then
- *  chunk each group into 4 main + 1 sub. Falls back to chunking everything by 5
- *  if the squad encoding isn't present. `dbIdByIgn` cross-annotates each slot
- *  with its resolved database id (name match, case-insensitive) when known —
- *  QA visibility only; switch-time resolution matches by name independently. */
-function buildTeams(
-  players: FetchedPlayer[],
-  dbIdByIgn: Map<string, string>,
-): Team[] {
-  const groups = new Map<number, FetchedPlayer[]>();
-  for (const p of players) {
-    const pid = parseInt(p.playerId, 10) || 0;
-    const squad = pid > 0 ? Math.floor(pid / 0x1000000) : 0;
-    if (!groups.has(squad)) groups.set(squad, []);
-    groups.get(squad)!.push(p);
-  }
-  const mk = (
-    src: FetchedPlayer | undefined,
-    role: PlayerRole,
-  ): TeamPlayer => ({
-    id: rid("p"),
-    playerName: src?.name ?? "",
-    uid: src?.uid ?? "",
-    playerId: src?.playerId ?? "",
-    role,
-    dbPlayerId: src?.name ? dbIdByIgn.get(src.name.toLowerCase()) : undefined,
-  });
-
-  const teams: Team[] = [];
-  let teamNo = 1;
-  for (const [, ps] of [...groups.entries()].sort((a, b) => a[0] - b[0])) {
-    ps.sort(
-      (a, b) =>
-        (parseInt(a.playerId, 10) || 0) - (parseInt(b.playerId, 10) || 0),
-    );
-    for (let i = 0; i < ps.length; i += TEAM_SIZE) {
-      const chunk = ps.slice(i, i + TEAM_SIZE);
-      const slots: TeamPlayer[] = [];
-      for (let j = 0; j < MAIN_COUNT; j++) slots.push(mk(chunk[j], "main"));
-      slots.push(mk(chunk[MAIN_COUNT], "sub"));
-      teams.push({ id: rid("t"), name: `Team ${teamNo++}`, players: slots });
-    }
-  }
-  return teams;
-}
-
 export default function TeamInfo() {
   const dispatch = useAppDispatch();
   const settings = useAppSelector((s) => s.observer.settings);
   const runtime = useAppSelector((s) => s.observer.runtime);
-  const dbPlayers = useAppSelector((s) => s.observer.dbPlayers);
   const [copied, setCopied] = useState<string | null>(null);
   const [fetching, setFetching] = useState(false);
   const [status, setStatus] = useState<string | null>(null);
@@ -128,11 +78,15 @@ export default function TeamInfo() {
   const toggleCollapse = (id: string) =>
     setCollapsed((prev) => {
       const next = new Set(prev);
-      next.has(id) ? next.delete(id) : next.add(id);
+      if (next.has(id)) next.delete(id);
+      else next.add(id);
       return next;
     });
 
-  const teams = settings?.teams ?? [];
+  // Stable reference (not a fresh `[]` literal every render) so the
+  // useMemo below doesn't get an unstable dependency while settings is
+  // still loading — hooks must stay unconditional, before any early return.
+  const teams = settings?.teams ?? EMPTY_TEAMS;
 
   const knownUids = useMemo(() => {
     const set = new Set<string>();
@@ -188,45 +142,25 @@ export default function TeamInfo() {
     setTimeout(() => setCopied((c) => (c === uid ? null : c)), 1200);
   };
 
+  // Always refetches and fully replaces — a deliberate, explicit action the
+  // operator takes on this page only, never triggered automatically.
   const fetchPlayers = async () => {
     setFetching(true);
     setStatus(null);
     try {
-      const players = await api.fetchPlayersFromDebugger();
-      if (players.length === 0) {
-        setStatus(
-          "No players found in the latest debugger file yet. Start/observe a match first.",
-        );
-        return;
-      }
-      if (
-        teams.length > 0 &&
-        !confirm(
-          `Replace the current teams with ${players.length} fetched players?`,
-        )
-      ) {
+      const dbFetched = await api.fetchPlayersFromServer();
+      dispatch(setDbPlayers(dbFetched));
+
+      const built = buildTeamsFromDb(dbFetched);
+      if (built.length === 0) {
+        setStatus("No active players found in the tournament database yet.");
         return;
       }
 
-      // Also fetch + cache the database roster (saved for reuse, not
-      // re-fetched per detection) so built slots can be cross-annotated with
-      // their resolved database id. Non-fatal — debugger-based team building
-      // still works if this fails, it just won't have DB-match annotations yet.
-      let dbMap = dbPlayerIdByIgn(dbPlayers);
-      let dbNote = "";
-      try {
-        const dbFetched = await api.fetchPlayersFromServer();
-        dispatch(setDbPlayers(dbFetched));
-        dbMap = dbPlayerIdByIgn(dbFetched);
-        dbNote = ` (${dbFetched.length} database players matched)`;
-      } catch (e) {
-        dbNote = ` — database fetch failed: ${friendlyDbFetchError(e)}`;
-      }
-
-      await setTeams(buildTeams(players, dbMap));
-      setStatus(`Fetched ${players.length} player(s) into teams.${dbNote}`);
+      await setTeams(built);
+      setStatus(`Fetched ${built.length} team(s) from the database.`);
     } catch (e) {
-      setStatus(String(e));
+      setStatus(friendlyDbFetchError(e));
     } finally {
       setFetching(false);
     }
@@ -308,8 +242,8 @@ export default function TeamInfo() {
             No teams yet
           </div>
           <div style={{ fontSize: 12.5 }}>
-            Use <b>Fetch Players</b> to build teams from the latest debugger
-            file, or add one manually.
+            Use <b>Fetch Players</b> to build teams from the tournament
+            database, or add one manually.
           </div>
           <div style={{ display: "flex", gap: 10 }}>
             <button
@@ -412,8 +346,7 @@ export default function TeamInfo() {
                       />
                     ))}
                     <PlayerRow
-                      label="Substitute"
-                      accent
+                      label="Player 5"
                       p={sub}
                       onChange={(patch) => updatePlayer(t.id, sub.id, patch)}
                     />
@@ -431,12 +364,10 @@ export default function TeamInfo() {
 function PlayerRow({
   label,
   p,
-  accent,
   onChange,
 }: {
   label: string;
   p: TeamPlayer;
-  accent?: boolean;
   onChange: (patch: Partial<TeamPlayer>) => void;
 }) {
   const cell = (key: keyof TeamPlayer, placeholder: string) => (
@@ -459,7 +390,7 @@ function PlayerRow({
           gap: 6,
           fontSize: 12,
           fontWeight: 600,
-          color: accent ? "#facc15" : "var(--text-secondary)",
+          color: "var(--text-secondary)",
         }}
       >
         <span

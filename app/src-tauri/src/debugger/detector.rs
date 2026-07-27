@@ -149,7 +149,7 @@ pub fn scan_drives() -> Vec<PathBuf> {
                     // Don't descend further into the matched data dir.
                     continue;
                 }
-                if depth + 1 <= MAX_DEPTH {
+                if depth < MAX_DEPTH {
                     queue.push_back((path, depth + 1));
                 }
             }

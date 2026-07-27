@@ -121,15 +121,6 @@ impl ObserverParser {
         self.uid_to_player.len()
     }
 
-    /// All players resolved to a uid so far: `(uid, playerId, name)`. Used to
-    /// auto-build the Team Info roster from a debugger file.
-    pub fn known_players(&self) -> Vec<(String, String, String)> {
-        self.uid_to_player
-            .iter()
-            .map(|(uid, rec)| (uid.clone(), rec.player_id.clone(), rec.name.clone()))
-            .collect()
-    }
-
     fn parse_frame(line: &str) -> Option<String> {
         RE_FRAME
             .captures(line)

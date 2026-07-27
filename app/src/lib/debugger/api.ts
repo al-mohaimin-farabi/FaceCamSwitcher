@@ -7,7 +7,6 @@ import type {
   AppSettings,
   DbPlayer,
   DetectionResult,
-  FetchedPlayer,
   FolderValidation,
   ObserverConfig,
   ObserverUpdate,
@@ -39,8 +38,6 @@ export const api = {
   getObserverStates: () => invoke<ObserverUpdate[]>("get_observer_states"),
 
   appVersion: () => invoke<string>("app_version"),
-  fetchPlayersFromDebugger: () =>
-    invoke<FetchedPlayer[]>("fetch_players_from_debugger"),
   fetchPlayersFromServer: () => invoke<DbPlayer[]>("fetch_players_from_server"),
   checkServerHealth: () => invoke<CommandResult>("check_server_health"),
 };

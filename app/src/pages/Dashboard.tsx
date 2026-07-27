@@ -17,7 +17,11 @@ import {
   Settings2,
 } from "lucide-react";
 import { useAppDispatch, useAppSelector } from "../store/hooks";
-import { setObservers, removeRuntime } from "../store/observerSlice";
+import {
+  setObservers,
+  removeRuntime,
+  resolveDbPlayerId,
+} from "../store/observerSlice";
 import { api } from "../lib/debugger/api";
 import { networkSync } from "../lib/debugger/networkSync";
 import type { ObserverConfig } from "../lib/debugger/types";
@@ -122,6 +126,7 @@ export default function Dashboard() {
   const observers = useAppSelector((s) => s.observer.observers);
   const runtime = useAppSelector((s) => s.observer.runtime);
   const teams = useAppSelector((s) => s.observer.settings?.teams ?? []);
+  const dbPlayers = useAppSelector((s) => s.observer.dbPlayers);
   const syncOnline = useAppSelector((s) => s.observer.networkSyncConnected);
   const networkSyncCfg = useAppSelector(
     (s) => s.observer.settings?.networkSync,
@@ -135,10 +140,9 @@ export default function Dashboard() {
   // (mirrors localized-input's start_ocr/stop_ocr lifecycle).
   const syncNetworkFor = (o: ObserverConfig, live: boolean) => {
     if (live) {
-      if (networkSyncCfg?.enabled)
-        networkSync.connect(networkSyncCfg, o.sourceId);
+      if (networkSyncCfg) networkSync.connect(networkSyncCfg, o.sourceId);
     } else {
-      networkSync.disconnect();
+      networkSync.disconnect("Stopped on Dashboard");
     }
   };
 
@@ -146,6 +150,10 @@ export default function Dashboard() {
   const observer = observers[0];
   const rt = observer ? runtime[observer.id] : undefined;
   const co = rt?.currentObserver;
+  // "Player ID" displays the resolved database id — the same resolution
+  // switch-time matching uses (uid first, name fallback) — not Free Fire's
+  // own internal numeric id, which has no database equivalent to show.
+  const resolvedDbId = co ? resolveDbPlayerId(co, dbPlayers).id : undefined;
   const status = observer
     ? observer.enabled
       ? (rt?.status ?? "waiting")
@@ -176,26 +184,6 @@ export default function Dashboard() {
           : `Slot saved (${o.sourceId})`,
       );
       setTimeout(() => setConfigMessage(null), 3500);
-    }
-  };
-
-  const toggleEnabled = async (o: ObserverConfig) => {
-    if (actionBusy) return;
-    setActionBusy(true);
-    try {
-      const updated = { ...o, enabled: !o.enabled };
-      await api.upsertObserver(updated);
-      await refresh();
-      if (updated.enabled) {
-        await api.startObserver(o.id).catch(() => {});
-        syncNetworkFor(updated, true);
-      } else {
-        await api.stopObserver(o.id).catch(() => {});
-        dispatch(removeRuntime(o.id));
-        syncNetworkFor(updated, false);
-      }
-    } finally {
-      setActionBusy(false);
     }
   };
 
@@ -313,18 +301,28 @@ export default function Dashboard() {
                 </div>
                 <div
                   style={{
-                    display: "inline-flex",
+                    display: "flex",
                     alignItems: "center",
-                    gap: 5,
-                    fontSize: 11.5,
-                    color: "var(--text-muted)",
-                    fontWeight: 700,
-                    textTransform: "uppercase",
-                    letterSpacing: "0.05em",
+                    gap: 10,
                     marginTop: 4,
+                    flexWrap: "wrap",
                   }}
                 >
-                  <MonitorDot size={12} /> Local PC
+                  <span
+                    style={{
+                      display: "inline-flex",
+                      alignItems: "center",
+                      gap: 5,
+                      fontSize: 11.5,
+                      color: "var(--text-muted)",
+                      fontWeight: 700,
+                      textTransform: "uppercase",
+                      letterSpacing: "0.05em",
+                    }}
+                  >
+                    <MonitorDot size={12} /> Local PC
+                  </span>
+                  <span className="feed-team">Source {observer.sourceId}</span>
                 </div>
               </div>
               <span
@@ -405,7 +403,7 @@ export default function Dashboard() {
               <DTile
                 icon={<IdCard size={12} />}
                 k="Player ID"
-                v={co?.playerId ?? "—"}
+                v={resolvedDbId ?? "—"}
               />
               <DTile
                 icon={<Binary size={12} />}
@@ -436,40 +434,23 @@ export default function Dashboard() {
 
             {/* Controls */}
             <div className="control-bar">
-              <label className="switch" title="Enable / disable">
-                <input
-                  type="checkbox"
-                  checked={observer.enabled}
+              {isWatching ? (
+                <button
+                  className="btn btn-danger"
+                  onClick={() => startStop(observer, false)}
                   disabled={actionBusy}
-                  onChange={() => toggleEnabled(observer)}
-                />
-                <span className="slider" />
-              </label>
-              <span
-                className={`control-status ${observer.enabled ? "on" : ""}`}
-              >
-                <span className="led" />{" "}
-                {observer.enabled ? "Enabled" : "Disabled"}
-              </span>
-
-              {observer.enabled &&
-                (isWatching ? (
-                  <button
-                    className="btn btn-danger"
-                    onClick={() => startStop(observer, false)}
-                    disabled={actionBusy}
-                  >
-                    <CircleStop size={15} /> Stop
-                  </button>
-                ) : (
-                  <button
-                    className="btn btn-success"
-                    onClick={() => startStop(observer, true)}
-                    disabled={actionBusy}
-                  >
-                    <CirclePlay size={15} /> Start
-                  </button>
-                ))}
+                >
+                  <CircleStop size={15} /> Stop
+                </button>
+              ) : (
+                <button
+                  className="btn btn-success"
+                  onClick={() => startStop(observer, true)}
+                  disabled={actionBusy}
+                >
+                  <CirclePlay size={15} /> Start
+                </button>
+              )}
 
               {configMessage && (
                 <span
@@ -523,6 +504,7 @@ export default function Dashboard() {
           initial={observer}
           onClose={() => setEditing(false)}
           onSave={saveObserver}
+          sourceSlotLocked={isWatching}
         />
       )}
     </div>

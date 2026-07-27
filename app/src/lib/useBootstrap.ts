@@ -23,11 +23,26 @@ export function useBootstrap() {
     networkSync.setTeams(teams ?? []);
   }, [teams]);
 
-  // Network Sync connect/disconnect is NOT triggered here — it's tied to the
-  // Dashboard Start/Stop button (see Dashboard.tsx's startStop/toggleEnabled),
-  // same "one button = go live" lifecycle localized-input's start_ocr/stop_ocr
-  // uses. Auto-connecting at app launch would let a dedicated broadcast PC
-  // claim its source slot before the operator is actually ready to observe.
+  // Neither the local debugger watcher nor Network Sync is auto-started here
+  // — both are tied to the Dashboard Start/Stop button (see Dashboard.tsx's
+  // startStop), same "one button = go live" lifecycle localized-input's
+  // start_ocr/stop_ocr uses. Auto-starting the watcher at launch would
+  // immediately re-tail whatever debugger log is already on disk — e.g. a
+  // finished match from a previous session — and surface its last line as
+  // "current" with a live timestamp, before the operator has done anything.
+  // The app should open idle every time.
+
+  // Block Ctrl+R — WebView2 maps it to a full page reload by default, which
+  // would drop the live Network Sync connection and local watcher mid-show.
+  // There's no Tauri config toggle for this; intercepting the key event is
+  // the standard way to disable a browser-native accelerator in a WebView.
+  useEffect(() => {
+    const blockReload = (e: KeyboardEvent) => {
+      if (e.ctrlKey && e.key.toLowerCase() === "r") e.preventDefault();
+    };
+    window.addEventListener("keydown", blockReload);
+    return () => window.removeEventListener("keydown", blockReload);
+  }, []);
 
   useEffect(() => {
     let disposed = false;
@@ -54,12 +69,13 @@ export function useBootstrap() {
         dispatch(setVersion(version));
         networkSync.setTeams(settings.teams ?? []);
 
-        // 3. Hydrate any existing runtime snapshots.
+        // 3. Hydrate any existing runtime snapshots — only relevant if the
+        // Rust backend is still alive from before this webview mounted
+        // (e.g. a dev-mode webview reload while genuinely observing), since
+        // stop_observer/stop_all_observers clear this on Stop and a full
+        // app relaunch always starts with an empty backend runtime map.
         const states = await api.getObserverStates();
         for (const s of states) dispatch(applyObserverUpdate(s));
-
-        // 4. Start local watches.
-        await api.startAllObservers();
       } catch (err) {
         console.error("Bootstrap failed:", err);
       }
@@ -68,7 +84,7 @@ export function useBootstrap() {
     return () => {
       disposed = true;
       unlisteners.forEach((u) => u());
-      networkSync.disconnect();
+      networkSync.disconnect("App closing");
     };
   }, [dispatch]);
 }

@@ -6,10 +6,14 @@ export default function ObserverModal({
   initial,
   onClose,
   onSave,
+  sourceSlotLocked,
 }: {
   initial: ObserverConfig;
   onClose: () => void;
   onSave: (o: ObserverConfig) => Promise<void>;
+  /** True while this observer is actively running — the slot is this PC's
+   *  identity for the live session, so it can't change mid-run. Stop first. */
+  sourceSlotLocked?: boolean;
 }) {
   const [draft, setDraft] = useState<ObserverConfig>(initial);
   const [saving, setSaving] = useState(false);
@@ -19,14 +23,10 @@ export default function ObserverModal({
     setDraft((d) => ({ ...d, ...patch }));
 
   const save = async () => {
-    if (!draft.displayName.trim()) {
-      setError("Display name is required");
-      return;
-    }
     setSaving(true);
     setError(null);
     try {
-      await onSave({ ...draft, displayName: draft.displayName.trim() });
+      await onSave(draft);
       onClose();
     } catch (e) {
       setError(String(e));
@@ -55,36 +55,13 @@ export default function ObserverModal({
         </div>
 
         <div className="field">
-          <label className="field-label">Display Name</label>
-          <input
-            className="input"
-            placeholder="e.g. Observer PC 01"
-            value={draft.displayName}
-            onChange={(e) => set({ displayName: e.target.value })}
-          />
-        </div>
-
-        <div className="field">
-          <label className="field-label">
-            Local Debugger Path (optional — defaults to global)
-          </label>
-          <input
-            className="input"
-            placeholder="Leave blank to use the global debugger folder"
-            value={draft.localDebuggerPath ?? ""}
-            onChange={(e) =>
-              set({ localDebuggerPath: e.target.value || undefined })
-            }
-          />
-        </div>
-
-        <div className="field">
           <label className="field-label">
             Source Slot — which output this PC feeds
           </label>
           <select
             className="input"
             value={draft.sourceId || "01"}
+            disabled={sourceSlotLocked}
             onChange={(e) => set({ sourceId: e.target.value })}
           >
             {["01", "02", "03"].map((id) => (
@@ -93,23 +70,17 @@ export default function ObserverModal({
               </option>
             ))}
           </select>
-        </div>
-
-        <div
-          className="field"
-          style={{ display: "flex", alignItems: "center", gap: 10 }}
-        >
-          <label className="switch">
-            <input
-              type="checkbox"
-              checked={draft.enabled}
-              onChange={(e) => set({ enabled: e.target.checked })}
-            />
-            <span className="slider" />
-          </label>
-          <span style={{ fontSize: 13, color: "var(--text-secondary)" }}>
-            Enabled
-          </span>
+          {sourceSlotLocked && (
+            <p
+              style={{
+                fontSize: 11.5,
+                color: "var(--text-muted)",
+                marginTop: 6,
+              }}
+            >
+              Stop observing to change the slot.
+            </p>
+          )}
         </div>
 
         {error && (
