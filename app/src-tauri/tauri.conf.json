@@ -1,7 +1,7 @@
 {
   "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
   "productName": "FaceCam",
-  "version": "0.2.0",
+  "version": "0.3.0",
   "identifier": "com.themis.facecam",
   "build": {
     "frontendDist": "../dist",

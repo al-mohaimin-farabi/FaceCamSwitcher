@@ -1,6 +1,6 @@
 [package]
 name = "efinity-facecam"
-version = "0.2.0"
+version = "0.3.0"
 description = "Efinity FaceCam — PCOB debugger-based observer utility for Free Fire"
 authors = ["themisuwu"]
 edition = "2021"
