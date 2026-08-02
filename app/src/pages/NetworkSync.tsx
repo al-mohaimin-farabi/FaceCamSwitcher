@@ -13,10 +13,6 @@ import type { AppSettings, NetworkSyncConfig } from "../lib/debugger/types";
 export default function NetworkSync() {
   const dispatch = useAppDispatch();
   const settings = useAppSelector((s) => s.observer.settings);
-  const connected = useAppSelector((s) => s.observer.networkSyncConnected);
-  const authenticated = useAppSelector(
-    (s) => s.observer.networkSyncAuthenticated,
-  );
   const observers = useAppSelector((s) => s.observer.observers);
   const log = useAppSelector((s) => s.observer.networkSyncLog);
 
@@ -105,8 +101,9 @@ export default function NetworkSync() {
         <div>
           <div className="page-title">Network Sync</div>
           <div className="page-subtitle">
-            Push detected observer switches to the FaceCam server in real time
-            (Source {sourceId}).
+            Configure the connection Dashboard uses to push detected switches to
+            the FaceCam server (Source {sourceId}). Going live happens there,
+            not here.
           </div>
         </div>
         <div style={{ display: "flex", gap: 8 }}>
@@ -119,17 +116,6 @@ export default function NetworkSync() {
               {serverOnline ? "Online" : "Offline"}
             </span>
           )}
-          <span
-            className={`badge ${authenticated ? "badge-connected" : connected ? "badge-waiting" : "badge-error"}`}
-            title="Live OCR connection, driven by Dashboard's Start/Stop"
-          >
-            <span className="dot" /> Sync{" "}
-            {authenticated
-              ? "Authenticated"
-              : connected
-                ? "Connecting…"
-                : "Offline"}
-          </span>
         </div>
       </div>
 

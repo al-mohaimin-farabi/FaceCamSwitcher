@@ -128,12 +128,22 @@ export default function Dashboard() {
   const teams = useAppSelector((s) => s.observer.settings?.teams ?? []);
   const dbPlayers = useAppSelector((s) => s.observer.dbPlayers);
   const syncOnline = useAppSelector((s) => s.observer.networkSyncConnected);
+  const syncAuthenticated = useAppSelector(
+    (s) => s.observer.networkSyncAuthenticated,
+  );
   const networkSyncCfg = useAppSelector(
     (s) => s.observer.settings?.networkSync,
   );
   const [editing, setEditing] = useState(false);
   const [configMessage, setConfigMessage] = useState<string | null>(null);
   const [actionBusy, setActionBusy] = useState(false);
+  // Drives the Start button's own state while a start is in flight — separate
+  // from isWatching, which only becomes true once the watcher actually
+  // starts, and per the gated flow below, that's now held off until the
+  // server has genuinely confirmed authentication.
+  const [startPhase, setStartPhase] = useState<
+    "idle" | "connecting" | "failed"
+  >("idle");
 
   // Connect Network Sync alongside starting the observer, disconnect
   // alongside stopping it — one action, both halves of "go live" together
@@ -192,9 +202,34 @@ export default function Dashboard() {
     setActionBusy(true);
     try {
       if (start) {
+        // Authenticate with the server FIRST. The watcher only starts, and
+        // the UI only shows "started", once that's genuinely confirmed —
+        // not the instant the local watcher happens to begin running.
+        // Network Sync has no on/off toggle anymore — it's just how Start
+        // works — so this always runs; an unconfigured/empty config still
+        // correctly fails fast via connect()'s own validation rather than
+        // silently pretending to be live.
+        if (networkSyncCfg) {
+          setStartPhase("connecting");
+          const result = await networkSync.connectAndWaitForAuth(
+            networkSyncCfg,
+            o.sourceId,
+          );
+          if (!result.ok) {
+            networkSync.disconnect(
+              `Start aborted — ${result.message ?? "authentication failed"}`,
+            );
+            setStartPhase("failed");
+            // Auto-clears back to a normal Start button rather than leaving
+            // "Connection Failed" showing forever.
+            setTimeout(() => setStartPhase("idle"), 3000);
+            return;
+          }
+        }
+        setStartPhase("idle");
         await api.startObserver(o.id);
-        syncNetworkFor(o, true);
       } else {
+        setStartPhase("idle");
         await api.stopObserver(o.id);
         dispatch(removeRuntime(o.id));
         syncNetworkFor(o, false);
@@ -442,6 +477,14 @@ export default function Dashboard() {
                 >
                   <CircleStop size={15} /> Stop
                 </button>
+              ) : startPhase === "connecting" ? (
+                <button className="btn btn-ghost" disabled>
+                  <span className="spinner" /> Connecting…
+                </button>
+              ) : startPhase === "failed" ? (
+                <button className="btn btn-danger" disabled>
+                  <CircleStop size={15} /> Connection Failed
+                </button>
               ) : (
                 <button
                   className="btn btn-success"
@@ -482,8 +525,8 @@ export default function Dashboard() {
         <InfoTile
           icon={<Globe size={17} />}
           label="Network Sync"
-          value={syncOnline ? "Online" : "Offline"}
-          color={syncOnline ? "#4ade80" : "#64748b"}
+          value={syncAuthenticated ? "Authenticated" : "Offline"}
+          color={syncAuthenticated ? "#4ade80" : "#64748b"}
         />
         <InfoTile
           icon={<FileText size={17} />}

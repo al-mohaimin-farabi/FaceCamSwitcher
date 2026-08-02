@@ -285,6 +285,47 @@ export class NetworkSyncManager {
     return null;
   }
 
+  /** Connects and resolves once the outcome is actually known — used by
+   *  Dashboard's Start button so it can hold off showing "started" until the
+   *  server has genuinely confirmed authentication, rather than the instant
+   *  the local watcher happens to begin running.
+   *
+   *  Runs its own timer rather than relying on connect()'s internal auth
+   *  timeout to signal failure: that timeout calls disconnect(), which does
+   *  socket.removeAllListeners() before tearing the socket down — so a
+   *  listener registered here for the socket's "disconnect" event would
+   *  already have been stripped by the time it fires and this would hang
+   *  forever. Mirrors the same AUTH_TIMEOUT_MS window instead. */
+  connectAndWaitForAuth(
+    config: NetworkSyncConfig,
+    sourceId: string,
+  ): Promise<{ ok: boolean; message?: string }> {
+    const err = this.connect(config, sourceId);
+    if (err) return Promise.resolve({ ok: false, message: err });
+
+    return new Promise((resolve) => {
+      let settled = false;
+      const finish = (ok: boolean, message?: string) => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timer);
+        this.socket?.off("ocrAuthSuccess", onSuccess);
+        this.socket?.off("ocrAuthFailed", onFailed);
+        resolve({ ok, message });
+      };
+      const onSuccess = () => finish(true);
+      const onFailed = (data: { message?: string }) =>
+        finish(false, data?.message ?? "Auth rejected");
+
+      this.socket?.on("ocrAuthSuccess", onSuccess);
+      this.socket?.on("ocrAuthFailed", onFailed);
+
+      const timer = setTimeout(() => {
+        finish(false, "Server did not respond within 15s");
+      }, AUTH_TIMEOUT_MS + 500);
+    });
+  }
+
   /** `reason` is logged only when there was actually a live socket to tear
    *  down — calling disconnect() when already disconnected stays silent, so
    *  the log isn't spammed on every redundant call. Every caller (explicit
